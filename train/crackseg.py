@@ -30,7 +30,7 @@ def main():
     parser.add_argument('--name', type=str, default="crack_11m_nopretrain_lr",
                         help='训练结果保存名称（默认：crack_11m_nopretrain_lr）')
     parser.add_argument('--model_nopretrain_lr）')
-    parser.add_argument('--model', type=str, default="yolo11n-seg.yaml",
+    parser.add_argument('--model', type=str, default="yolo11m-seg.yaml",
                         help='模型配置文件路径（默认：yolo11m-seg.yaml）')
 
     # 解析参数
