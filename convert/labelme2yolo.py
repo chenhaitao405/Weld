@@ -27,11 +27,37 @@ from utils.constants import IMAGE_EXTENSIONS
 
 
 class Labelme2YOLO:
-    """LabelMe到YOLO格式转换器 - 完整修复版"""
+    """LabelMe到YOLO格式转换器 - 增加目录前缀功能版本"""
+
+    def _sanitize_filename(self, filename):
+        """
+        清理文件名，将顿号替换为&
+
+        Args:
+            filename: 原始文件名
+
+        Returns:
+            处理后的文件名
+        """
+        return filename.replace('、', '&')
+
+    def _get_directory_prefix(self):
+        """
+        获取目录前缀（最后一级目录名）
+
+        Returns:
+            目录前缀字符串，如果启用add_prefix则返回目录名，否则返回空字符串
+        """
+        if self._add_prefix:
+            # 获取json_dir的最后一级目录名
+            dir_name = os.path.basename(os.path.normpath(self._image_dir))
+            if dir_name:
+                return f"{dir_name}_"
+        return ""
 
     def __init__(self, json_dir, to_seg=False, filter_label=None,
                  unify_to_crack=False, output_dir=None, image_dir=None,
-                 predefined_label_map=None):
+                 predefined_label_map=None, add_prefix=True):
         """
         初始化转换器
 
@@ -43,6 +69,7 @@ class Labelme2YOLO:
             output_dir: 输出目录
             image_dir: 图像文件目录（如果为None，则使用json_dir）
             predefined_label_map: 预定义的标签映射字典
+            add_prefix: 是否在文件名前添加目录前缀（默认True）
         """
         self._json_dir = json_dir
         self._image_dir = image_dir if image_dir else json_dir
@@ -50,6 +77,10 @@ class Labelme2YOLO:
         self._filter_label = filter_label
         self._unify_to_crack = unify_to_crack
         self._predefined_label_map = predefined_label_map
+        self._add_prefix = add_prefix
+
+        # 获取目录前缀
+        self._dir_prefix = self._get_directory_prefix()
 
         # 处理标签映射的优先级
         if predefined_label_map:
@@ -83,11 +114,16 @@ class Labelme2YOLO:
         print(f"  - Input image directory: {self._image_dir}")
         print(f"  - Output directory: {self._save_path_pfx}")
         print(f"  - Mode: {'Segmentation' if to_seg else 'Detection'}")
+        if add_prefix:
+            print(f"  - Directory prefix: {self._dir_prefix}")
+        else:
+            print(f"  - Directory prefix: Disabled")
         if filter_label:
             print(f"  - Filtering label: {filter_label}")
         if self._unify_to_crack:
             print(f"  - All labels unified to 'crack'")
         print(f"  - Label mapping: {dict(self._label_id_map)}")
+        print(f"  - 文件名处理: 顿号（、）将被替换为&")
 
     def _make_train_val_dir(self):
         """创建训练集和验证集目录"""
@@ -311,7 +347,7 @@ class Labelme2YOLO:
             return [label_id, yolo_center_x, yolo_center_y, yolo_w, yolo_h]
 
     def _save_yolo_image(self, json_name, image_dir_path, target_dir):
-        """保存图像到YOLO数据集"""
+        """保存图像到YOLO数据集（处理文件名中的顿号，添加目录前缀）"""
         json_name_without_ext = Path(json_name).stem
 
         # 从指定的图像目录查找对应的图像文件
@@ -326,8 +362,20 @@ class Labelme2YOLO:
             print(f"  警告: 未找到图像文件: {json_name_without_ext}")
             return None
 
-        # 复制图像
-        dst_img_path = Path(image_dir_path) / target_dir / src_img_path.name
+        # 处理目标文件名（替换顿号为&，添加目录前缀）
+        original_img_name = src_img_path.name
+        sanitized_img_name = self._sanitize_filename(original_img_name)
+        # 如果文件名发生了改变，记录日志
+        if original_img_name != sanitized_img_name:
+            if self._add_prefix:
+                print(f"  文件名重命名: {original_img_name} -> {sanitized_img_name}")
+        # 添加目录前缀
+        final_img_name = f"{self._dir_prefix}{sanitized_img_name}"
+
+
+
+        # 复制图像到目标路径（使用带前缀的文件名）
+        dst_img_path = Path(image_dir_path) / target_dir / final_img_name
         shutil.copy2(src_img_path, dst_img_path)
 
         return str(dst_img_path)
@@ -355,8 +403,8 @@ class Labelme2YOLO:
 
         # 记录处理统计
         stats = {
-            'train': {'success': 0, 'failed': 0, 'no_labels': 0},
-            'val': {'success': 0, 'failed': 0, 'no_labels': 0}
+            'train': {'success': 0, 'failed': 0, 'no_labels': 0, 'renamed': 0},
+            'val': {'success': 0, 'failed': 0, 'no_labels': 0, 'renamed': 0}
         }
 
         # 如果启用了unify_to_crack，记录原始标签
@@ -395,10 +443,21 @@ class Labelme2YOLO:
                         yolo_obj_list = self._get_yolo_object_list(json_data)
 
                         if yolo_obj_list:
-                            # 保存标注
+                            # 准备标签文件名（也要替换顿号，添加目录前缀）
+                            json_stem = Path(json_name).stem
+                            sanitized_stem = self._sanitize_filename(json_stem)
+
+                            # 添加目录前缀
+                            final_stem = f"{self._dir_prefix}{sanitized_stem}"
+
+                            # 记录重命名统计
+                            if json_stem != final_stem:
+                                stats[split_name]['renamed'] += 1
+
+                            # 保存标注（使用带前缀的文件名）
                             label_path = os.path.join(
                                 self._label_dir_path, target_dir,
-                                Path(json_name).stem + '.txt'
+                                final_stem + '.txt'
                             )
                             save_yolo_labels(
                                 yolo_obj_list, label_path,
@@ -423,6 +482,11 @@ class Labelme2YOLO:
             print(f"    - 成功: {s['success']}")
             print(f"    - 无标注: {s['no_labels']}")
             print(f"    - 失败: {s['failed']}")
+            if s['renamed'] > 0:
+                if self._add_prefix:
+                    print(f"    - 添加前缀文件: {s['renamed']} 个（{self._dir_prefix[:-1]}前缀）")
+                else:
+                    print(f"    - 重命名文件: {s['renamed']} 个（顿号->&&）")
 
         # 如果启用了unify_to_crack，显示原始标签信息
         if self._unify_to_crack and original_labels:
@@ -460,6 +524,10 @@ label_id_map: {dict(self._label_id_map)}
         if self._unify_to_crack:
             yaml_content += "\n# Note: All labels have been unified to 'crack'\n"
 
+        # 如果启用了目录前缀，添加注释
+        if self._add_prefix:
+            yaml_content += f"\n# Note: All files have been prefixed with directory name: {self._dir_prefix[:-1]}\n"
+
         # 写入文件
         yaml_path = os.path.join(self._save_path_pfx, 'dataset.yaml')
         with open(yaml_path, 'w', encoding='utf-8') as f:
@@ -470,15 +538,20 @@ label_id_map: {dict(self._label_id_map)}
 
 def main():
     parser = argparse.ArgumentParser(
-        description='将LabelMe JSON格式转换为YOLO格式（完整修复版）',
+        description='将LabelMe JSON格式转换为YOLO格式（支持目录前缀功能）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
-  # 基本转换（检测格式）
-  python labelme2yolo.py --json_dir ./labelme_data
+  # 基本转换（检测格式），自动添加目录前缀
+  python labelme2yolo.py --json_dir ./D1/labelme_data
+  # 输出文件名会变成: D1_img1.jpg, D1_img2.jpg 等
 
   # 转换为分割格式
-  python labelme2yolo.py --json_dir ./labelme_data --seg
+  python labelme2yolo.py --json_dir ./D2/labelme_data --seg
+  # 输出文件名会变成: D2_img1.jpg, D2_img2.jpg 等
+
+  # 不添加目录前缀
+  python labelme2yolo.py --json_dir ./labelme_data --no_prefix
 
   # 设置验证集比例
   python labelme2yolo.py --json_dir ./labelme_data --val_size 0.3
@@ -499,9 +572,12 @@ def main():
   python labelme2yolo.py --json_dir ./labelme_data --label_map '{"crack": 0, "scratch": 1}'
 
 注意：
+  - 默认会添加目录前缀，使用 --no_prefix 可以禁用
   - --unify_to_crack 会将所有标签统一为'crack'，适用于二分类任务
   - --label_map 主要用于批处理多个数据集时保持标签一致性
   - 两个参数不应同时使用
+  - 文件名中的中文顿号（、）会自动替换为&，确保文件系统兼容性
+  - 目录前缀功能帮助区分来自不同数据集的文件，避免重名
         """
     )
 
@@ -521,6 +597,8 @@ def main():
                         help='输出目录 (默认: json_dir/YOLODataset[_seg])')
     parser.add_argument('--label_map', type=str, default=None,
                         help='预定义的标签映射（JSON格式字符串，批处理用）')
+    parser.add_argument('--no_prefix', action='store_true',
+                        help='不添加目录前缀到文件名')
 
     args = parser.parse_args()
 
@@ -539,7 +617,7 @@ def main():
             print(f"错误：无法解析标签映射JSON: {e}")
             sys.exit(1)
 
-    # 创建转换器
+    # 创建转换器（add_prefix参数与no_prefix相反）
     converter = Labelme2YOLO(
         args.json_dir,
         to_seg=args.seg,
@@ -547,7 +625,8 @@ def main():
         unify_to_crack=args.unify_to_crack,
         output_dir=args.output_dir,
         image_dir=args.image_dir,
-        predefined_label_map=predefined_label_map
+        predefined_label_map=predefined_label_map,
+        add_prefix=not args.no_prefix  # 注意这里的逻辑
     )
 
     # 执行转换

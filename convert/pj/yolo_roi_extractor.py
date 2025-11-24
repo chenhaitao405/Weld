@@ -1,28 +1,7 @@
-"""
-脚本名称: yolo_roi_extractor.py
-功能概述: 使用YOLO模型从数据集中提取ROI区域并重新计算标签
-详细说明:
-    - 输入格式: YOLO格式数据集 + YOLO模型权重
-    - 处理流程: 模型推理 → ROI检测 → 图像裁剪 → 标签重计算
-    - 输出格式: 仅包含ROI区域的YOLO数据集
-依赖模块: utils.label_processing, utils.dataset_management, ultralytics
-使用示例:
-    # 基本使用（检测模式）
-    python yolo_roi_extractor.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt
-
-    # 分割模式
-    python yolo_roi_extractor.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt --mode seg
-
-    # 调整ROI检测阈值
-    python yolo_roi_extractor.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt --roi_conf 0.5
-
-    # 增加ROI区域padding
-    python yolo_roi_extractor.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt --padding 0.2
-"""
-
 import os
 import sys
 import cv2
+import shutil
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -32,14 +11,12 @@ from ultralytics import YOLO
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-
 current_script_path = os.path.abspath(__file__)
 pj_dir = os.path.dirname(current_script_path)
 convert_dir = os.path.dirname(pj_dir)
 dataprocess_dir = os.path.dirname(convert_dir)
-# 5. 将 dataprocess 目录添加到 Python 搜索路径
+# 将 dataprocess 目录添加到 Python 搜索路径
 sys.path.append(dataprocess_dir)
-
 
 from utils import (
     read_yolo_labels,
@@ -54,7 +31,7 @@ from utils import (
 
 
 class YOLOROIExtractor:
-    """YOLO ROI区域提取器"""
+    """YOLO ROI区域提取器（简化版：NOROI文件夹）"""
 
     def __init__(self,
                  input_dir: str,
@@ -91,10 +68,17 @@ class YOLOROIExtractor:
         # 创建输出目录结构
         create_directory_structure(self.output_dir)
 
+        # 创建NOROI文件夹（简化：直接存放图像）
+        self.no_roi_dir = self.output_dir / "NOROI"
+        self.no_roi_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  - 未检测到ROI目录: {self.no_roi_dir}")
+
         # 统计信息
         self.total_processed = 0
         self.total_roi_found = 0
         self.total_labels_adjusted = 0
+        self.total_no_roi_images = 0  # 未检测到ROI的图片数量
+        self.no_roi_files = []  # 记录未检测到ROI的文件名列表
 
         print(f"YOLO ROI提取器初始化:")
         print(f"  - 输入目录: {input_dir}")
@@ -267,6 +251,25 @@ class YOLOROIExtractor:
 
         return [class_id] + clipped_points
 
+    def _save_no_roi_image(self, image_path: Path):
+        """
+        保存未检测到ROI的图片到NOROI文件夹（简化版）
+
+        Args:
+            image_path: 原始图像路径
+        """
+        # 目标路径（直接放在NOROI文件夹下）
+        target_image_path = self.no_roi_dir / image_path.name
+
+        # 复制图像
+        shutil.copy2(str(image_path), str(target_image_path))
+
+        # 更新统计
+        self.total_no_roi_images += 1
+        self.no_roi_files.append(image_path.name)
+
+        print(f"  → 未检测到ROI，已保存到: NOROI/{image_path.name}")
+
     def _process_single_image(self, image_path: Path, label_path: Path,
                             split_type: str):
         """
@@ -288,14 +291,18 @@ class YOLOROIExtractor:
         # 检测ROI区域
         roi_boxes = self._detect_roi(str(image_path))
 
+        # 如果没有检测到ROI，保存到NOROI文件夹
         if not roi_boxes:
-            print(f"警告: 未检测到ROI {image_path}")
+            self._save_no_roi_image(image_path)
             return
 
         self.total_roi_found += len(roi_boxes)
 
         # 读取原始标签
-        original_labels = read_yolo_labels(str(label_path), self.mode)
+        if label_path.exists():
+            original_labels = read_yolo_labels(str(label_path), self.mode)
+        else:
+            original_labels = []
 
         # 处理每个ROI区域
         base_name = image_path.stem
@@ -359,8 +366,8 @@ class YOLOROIExtractor:
             image_files = list(image_dir.glob('*.jpg')) + \
                          list(image_dir.glob('*.jpeg')) + \
                          list(image_dir.glob('*.png')) + \
-                          list(image_dir.glob('*.tif')) + \
-                          list(image_dir.glob('*.bmp'))
+                         list(image_dir.glob('*.tif')) + \
+                         list(image_dir.glob('*.bmp'))
 
             print(f"\n处理{split_type}集: {len(image_files)}张图像")
 
@@ -369,18 +376,32 @@ class YOLOROIExtractor:
                 # 构造对应的标签文件路径
                 label_path = label_dir / f"{image_path.stem}.txt"
 
-                # 即使标签文件不存在也处理
-                if not label_path.exists():
-                    # 创建空标签文件
-                    label_path = Path("/dev/null")
-
                 self._process_single_image(image_path, label_path, split_type)
 
         # 复制并更新dataset.yaml
         self._update_dataset_yaml()
 
+        # 为未检测到ROI的图片创建简单的说明文件
+        self._create_no_roi_readme()
+
         # 打印统计信息
         self._print_statistics()
+
+    def _create_no_roi_readme(self):
+        """创建NOROI目录的说明文件（简化版）"""
+        if self.total_no_roi_images > 0:
+            readme_path = self.no_roi_dir / "README.txt"
+            with open(readme_path, 'w', encoding='utf-8') as f:
+                f.write("未检测到ROI的图片\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"总计: {self.total_no_roi_images} 张图片\n\n")
+                f.write("检测参数:\n")
+                f.write(f"  - 模型: {self.model_path}\n")
+                f.write(f"  - 置信度阈值: {self.roi_conf_threshold}\n")
+                f.write(f"  - IOU阈值: {self.roi_iou_threshold}\n\n")
+                f.write("文件列表:\n")
+                for idx, filename in enumerate(self.no_roi_files, 1):
+                    f.write(f"  {idx}. {filename}\n")
 
     def _update_dataset_yaml(self):
         """更新dataset.yaml文件"""
@@ -399,7 +420,8 @@ class YOLOROIExtractor:
                 'model_path': str(self.model_path),
                 'conf_threshold': self.roi_conf_threshold,
                 'iou_threshold': self.roi_iou_threshold,
-                'padding_ratio': self.padding_ratio
+                'padding_ratio': self.padding_ratio,
+                'no_roi_images': self.total_no_roi_images
             }
 
             # 保存更新后的yaml
@@ -415,31 +437,46 @@ class YOLOROIExtractor:
         print(f"✅ ROI提取完成！")
         print(f"📊 统计信息:")
         print(f"  - 处理图像数: {self.total_processed}")
-        print(f"  - 检测到的ROI数: {self.total_roi_found}")
+        print(f"  - 检测到ROI的图像数: {self.total_processed - self.total_no_roi_images}")
+        print(f"  - 未检测到ROI的图像数: {self.total_no_roi_images}")
+        print(f"  - 检测到的ROI总数: {self.total_roi_found}")
         print(f"  - 调整的标签数: {self.total_labels_adjusted}")
-        print(f"  - 平均每张图像ROI数: {self.total_roi_found/max(1, self.total_processed):.2f}")
+        if self.total_processed > 0:
+            detection_rate = (self.total_processed - self.total_no_roi_images) / self.total_processed * 100
+            print(f"  - ROI检测率: {detection_rate:.1f}%")
+            if self.total_processed - self.total_no_roi_images > 0:
+                avg_roi = self.total_roi_found / (self.total_processed - self.total_no_roi_images)
+                print(f"  - 平均每张图像ROI数（仅计算有ROI的）: {avg_roi:.2f}")
         print(f"  - 输出目录: {self.output_dir}")
+        if self.total_no_roi_images > 0:
+            print(f"  - 未检测到ROI的图片保存在: {self.no_roi_dir}")
 
 
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description='使用YOLO模型从数据集中提取ROI区域',
+        description='使用YOLO模型从数据集中提取ROI区域（简化版）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
   # 基本使用（检测模式）
-  python yolo_roi_extractor.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt
+  python yolo_roi_extractor_simplified.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt
   
   # 分割模式
-  python yolo_roi_extractor.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt --mode seg
+  python yolo_roi_extractor_simplified.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt --mode seg
   
   # 调整ROI检测阈值
-  python yolo_roi_extractor.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt --roi_conf 0.5 --roi_iou 0.7
+  python yolo_roi_extractor_simplified.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt --roi_conf 0.5 --roi_iou 0.7
   
   # 增加ROI区域padding（20%）
-  python yolo_roi_extractor.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt --padding 0.2
+  python yolo_roi_extractor_simplified.py --input_dir ./dataset --output_dir ./roi_dataset --model_path ./weights/best.pt --padding 0.2
+
+注意：
+  - 未检测到ROI的图片会被直接保存到输出目录下的"NOROI"文件夹中
+  - 只保存原始图像，不保存标签文件
+  - 不区分train/val，所有未检测到ROI的图片都放在同一个文件夹
+  - 包含一个README.txt文件列出所有未检测到ROI的图片文件名
         """
     )
 
