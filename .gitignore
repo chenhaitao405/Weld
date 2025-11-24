@@ -5,3 +5,4 @@
 /YOLODataset_seg
 /.idea
 /__pycache__
+/train/runs
