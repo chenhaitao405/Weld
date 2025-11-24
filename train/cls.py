@@ -1,3 +1,14 @@
+import matplotlib
+
+matplotlib.use('Agg')  # 使用非交互式后端
+import matplotlib.pyplot as plt
+import argparse  # 导入命令行参数解析模块
+
+# 设置中文字体
+matplotlib.rcParams['font.sans-serif'] = ['AR PL UKai CN', 'Noto Sans CJK JP', 'DejaVu Sans']
+matplotlib.rcParams['axes.unicode_minus'] = False
+print(f"\n已设置字体为: AR PL UKai CN")
+
 from ultralytics import YOLO
 
 # 1. 加载 YOLOv11M 预训练分类模型（自动下载权重）
@@ -5,14 +16,11 @@ model = YOLO("yolo11m-cls.yaml")  # build a new model from YAML
 
 # 2. 训练分类模型（核心参数仅保留必要项，其他默认）
 results = model.train(
-    data=r"C:\Users\CHT\Desktop\datasets1117\labeled\processed\cls",  # 替换为你的数据集路径
+    data="/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/cls320/cls",  # 替换为你的数据集路径
     epochs=500,
-    batch=64,
+    batch=512,
     imgsz=224,
     workers =0,
-    name="weld",                  # 任务名改为 "weld"（输出目录会变成 runs/cls/weld）
-    augment=False,                # 关闭所有图像增强（核心参数）
-    mixup=0.0,                    # 额外禁用mixup混合增强（保险起见，默认augment=False已包含）
-    mosaic=0.0,                   # 禁用mosaic增强（分类任务默认关闭，此处明确指定）
-    erasing=0.0,
+    name="cls320", erasing=0, mosaic=0, hsv_h=0.0,
+    hsv_s=0.0, hsv_v=0.0, auto_augment=None, scale=0
 )

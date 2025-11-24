@@ -45,8 +45,8 @@ def generate_manifest(input_dir, manifest_path):
 
 def copy_from_manifest(input_dir, manifest_path, output_dir):
     """
-    模式2：生成数据模式
-    根据清单从input_dir复制文件到output_dir，保持目录结构
+    模式2:生成数据模式
+    根据清单从input_dir复制文件到output_dir,保持目录结构
     """
     input_path = Path(input_dir)
     output_path = Path(output_dir)
@@ -69,7 +69,10 @@ def copy_from_manifest(input_dir, manifest_path, output_dir):
     success_count = 0
     missing_count = 0
 
-    for relative_path in file_list:
+    for relative_path_str in file_list:
+        # ✨ 关键修改:将路径字符串转换为Path对象,自动处理不同系统的路径分隔符
+        relative_path = Path(relative_path_str.replace('\\', '/'))  # 先统一转换为正斜杠
+
         src_file = input_path / relative_path
         dst_file = output_path / relative_path
 
@@ -81,7 +84,7 @@ def copy_from_manifest(input_dir, manifest_path, output_dir):
             success_count += 1
             print(f"  复制: {relative_path}")
         else:
-            print(f"  ⚠ 缺失: {relative_path}")
+            print(f"  ⚠ 缺失: {relative_path} (实际查找: {src_file})")
             missing_count += 1
 
     print(f"\n✓ 数据复制完成")
@@ -89,7 +92,6 @@ def copy_from_manifest(input_dir, manifest_path, output_dir):
     if missing_count > 0:
         print(f"  - 缺失文件: {missing_count} 个")
     print(f"  - 输出目录: {output_dir}")
-
 
 def main():
     parser = argparse.ArgumentParser(

@@ -20,8 +20,8 @@ if platform.system() == "Windows":
     JSON_BASE_PATH = r"C:\Users\CHT\Desktop\datasets1117\adjust"
     MODEL_PATH = "E:\CODE\weldDataProcess\model\weldDetect.pt"
 elif platform.system() == "Linux":
-    BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled"
-    JSON_BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled"  # 修复引号缺失问题
+    BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/picked"
+    JSON_BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/adjust"  # 修复引号缺失问题
     MODEL_PATH = "/home/lenovo/code/CHT/detect/ultralytics-main/runs/detect/11m_pretrain/weights/best.pt"
 else:
     # 其他系统（如macOS）可根据需要添加配置，这里抛出异常提醒
@@ -32,13 +32,13 @@ else:
 
 DATASETS = [
     "D1",
-    # "D2",
-    # "D3",
-    # "D4",
-    # "img20250608",
-    # "img20250609"
+    "D2",
+    "D3",
+    "D4",
+    "img20250608",
+    "img20250609"
 ]
-OUTPUT_BASE_DIR = "test"
+OUTPUT_BASE_DIR = "merge_pick"
 OUTPUT_CONFIG = {
     "yolo_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"yolo"),
     "roi_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"convert"),
@@ -48,7 +48,7 @@ OUTPUT_CONFIG = {
 FIXED_PARAMS = {
     "labelme2yolo": {
         "seg": True,
-        "unify_to_crack": True,  # 如果为True，所有标签都会被统一为crack
+        "unify_to_crack": False,  # 如果为True，所有标签都会被统一为crack
         "script_path": "convert/labelme2yolo.py"
     },
     "yolo_roi_extractor": {
@@ -62,8 +62,8 @@ FIXED_PARAMS = {
     "patchandenhance": {
         "overlap": 0.7,
         "enhance_mode": "windowing",
-        "no_slice":False,
-        "window_size": [640, 640],
+        "no_slice":True,
+        "window_size": [320, 320],
         "label_mode": "seg",
         "script_path": "convert/pj/patchandenhance.py"
     },
