@@ -3,3 +3,5 @@
 /alldata
 /testdata
 /YOLODataset_seg
+/.idea
+/__pycache__
