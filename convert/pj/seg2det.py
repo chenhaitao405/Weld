@@ -27,6 +27,13 @@ from tqdm import tqdm
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+current_script_path = os.path.abspath(__file__)
+pj_dir = os.path.dirname(current_script_path)
+convert_dir = os.path.dirname(pj_dir)
+dataprocess_dir = os.path.dirname(convert_dir)
+# 5. 将 dataprocess 目录添加到 Python 搜索路径
+sys.path.append(dataprocess_dir)
+
 from utils import (
     read_yolo_labels,
     save_yolo_labels,
