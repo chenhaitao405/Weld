@@ -1,5 +1,4 @@
-
-# !/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import os
@@ -12,6 +11,7 @@ from pathlib import Path
 import platform
 from tqdm import tqdm
 import shutil
+import argparse
 
 # ========================= 配置区域 =========================
 # 根据操作系统自动选择路径
@@ -32,13 +32,13 @@ else:
 
 DATASETS = [
     "D1",
-    "D2",
-    "D3",
-    "D4",
-    "img20250608",
-    "img20250609"
+    # "D2",
+    # "D3",
+    # "D4",
+    # "img20250608",
+    # "img20250609"
 ]
-OUTPUT_BASE_DIR = "processed"
+OUTPUT_BASE_DIR = "test"
 OUTPUT_CONFIG = {
     "yolo_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"yolo"),
     "roi_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"convert"),
@@ -73,7 +73,89 @@ FIXED_PARAMS = {
     }
 }
 
+# 定义步骤信息
+STEP_INFO = {
+    '1': {
+        'name': 'Labelme转YOLO',
+        'func': 'step1_labelme2yolo',
+        'input': None,
+        'output': 'yolo_dir'
+    },
+    '2': {
+        'name': 'YOLO ROI提取',
+        'func': 'step2_roi_extractor',
+        'input': 'yolo_dir',
+        'output': 'roi_dir'
+    },
+    '3': {
+        'name': '图像裁剪与增强',
+        'func': 'step3_patch_enhance',
+        'input': 'roi_dir',
+        'output': 'patch_dir'
+    },
+    '4': {
+        'name': '训练任务转换',
+        'func': 'step4_seg2det',
+        'input': 'patch_dir',
+        'output': 'cls_dir'
+    }
+}
+
 # ===========================================================================
+
+def parse_arguments():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(
+        description='数据处理流水线控制脚本',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例用法：
+  python %(prog)s --steps 1234  # 运行所有4个步骤
+  python %(prog)s --steps 123   # 只运行前3个步骤
+  python %(prog)s --steps 234   # 只运行步骤2、3、4
+  python %(prog)s --steps 14    # 只运行步骤1和4
+  python %(prog)s --steps 2     # 只运行步骤2
+  
+步骤说明：
+  1: Labelme转YOLO格式
+  2: YOLO ROI区域提取
+  3: 图像裁剪与增强
+  4: 训练任务转换（seg转det/cls）
+        """
+    )
+    
+    parser.add_argument(
+        '--steps',
+        type=str,
+        default='1234',
+        help='要执行的步骤编号，如 "1234" 执行全部，"123" 执行前三步 (默认: 1234)'
+    )
+    
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='强制执行步骤，即使前置依赖的输出目录不存在'
+    )
+    
+    return parser.parse_args()
+
+def validate_steps(steps_str: str) -> List[str]:
+    """验证并返回要执行的步骤列表"""
+    valid_steps = set('1234')
+    steps = []
+    
+    for char in steps_str:
+        if char in valid_steps:
+            if char not in steps:  # 避免重复
+                steps.append(char)
+        else:
+            print(f"⚠️ 警告：忽略无效的步骤编号 '{char}'")
+    
+    if not steps:
+        print("❌ 错误：没有有效的步骤可执行！")
+        sys.exit(1)
+    
+    return steps
 
 def collect_all_labels(datasets: List[str], json_base_path: str,
                        unify_to_crack: bool = False) -> OrderedDict:
@@ -133,7 +215,6 @@ def collect_all_labels(datasets: List[str], json_base_path: str,
 
     return label_map
 
-
 def create_dataset_yaml(output_dir: str, label_map: OrderedDict):
     """创建统一的dataset.yaml文件"""
     yaml_path = os.path.join(output_dir, "dataset.yaml")
@@ -158,7 +239,6 @@ label_id_map: {dict(label_map)}
         f.write(content)
 
     print(f"\n✅ 创建统一的 dataset.yaml: {yaml_path}")
-
 
 def process_labelme2yolo_unified(datasets: List[str], base_path: str,
                                   json_base_path: str, output_dir: str,
@@ -206,8 +286,6 @@ def process_labelme2yolo_unified(datasets: List[str], base_path: str,
         # 执行转换
         run_command(command, f"Labelme转YOLO - {dataset}")
 
-
-
 def run_command(command: List[str], step_name: str):
     """执行命令"""
     print(f"\n{'=' * 80}")
@@ -229,12 +307,10 @@ def run_command(command: List[str], step_name: str):
         print(f"\n❌ 【{step_name}】执行失败！错误码：{e.returncode}")
         sys.exit(1)
 
-
 def get_abs_path(relative_path: str) -> str:
     """获取脚本所在目录的绝对路径"""
     current_script_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.abspath(os.path.join(current_script_dir, relative_path))
-
 
 def process_roi_extractor(input_dir: str, output_dir: str):
     """执行 ROI 提取"""
@@ -251,7 +327,6 @@ def process_roi_extractor(input_dir: str, output_dir: str):
     ]
 
     run_command(command, "YOLO ROI提取")
-
 
 def process_patch_enhance(input_dir: str, output_dir: str):
     """执行图像裁剪增强"""
@@ -286,19 +361,16 @@ def seg2det(input_dir: str, output_dir: str):
     if FIXED_PARAMS["patchandenhance"]["no_slice"]:
         command.append("--no_slice")
 
-    run_command(command, "图像裁剪与增强")
+    run_command(command, "训练任务转换")
 
+# =================== 步骤执行函数 ===================
 
-def main():
-    print("🚀 数据处理流水线启动（简化版）！")
-    print(f"基础路径：{BASE_PATH}")
-    print(f"待处理数据集：{DATASETS}")
-
-
+def step1_labelme2yolo():
+    """步骤1: Labelme转YOLO格式"""
     print("\n" + "=" * 100)
-    print("📝 批量处理 Labelme 数据（使用统一标签映射）")
+    print("📝 步骤1: 批量处理 Labelme 数据（使用统一标签映射）")
     print("=" * 100)
-    # 第一步：labelme标签转换
+    
     process_labelme2yolo_unified(
         DATASETS,
         BASE_PATH,
@@ -306,44 +378,90 @@ def main():
         OUTPUT_CONFIG["yolo_dir"],
     )
 
-    # 第二步：执行 ROI 提取
+def step2_roi_extractor():
+    """步骤2: YOLO ROI提取"""
     print("\n" + "=" * 100)
-    print("📝 执行 YOLO ROI 区域提取")
+    print("📝 步骤2: 执行 YOLO ROI 区域提取")
     print("=" * 100)
-
+    
     if not os.path.exists(OUTPUT_CONFIG["yolo_dir"]):
-        print(f"❌ 错误：YOLO 数据集目录不存在 {OUTPUT_CONFIG['yolo_dir']}")
-        sys.exit(1)
-
+        print(f"⚠️ 警告：YOLO 数据集目录不存在 {OUTPUT_CONFIG['yolo_dir']}")
+        print("  提示：可能需要先执行步骤1")
+    
     process_roi_extractor(OUTPUT_CONFIG["yolo_dir"], OUTPUT_CONFIG["roi_dir"])
 
-    # 第三步：执行图像裁剪增强
+def step3_patch_enhance():
+    """步骤3: 图像裁剪与增强"""
     print("\n" + "=" * 100)
-    print("📝 执行图像裁剪与增强")
+    print("📝 步骤3: 执行图像裁剪与增强")
     print("=" * 100)
-
+    
     if not os.path.exists(OUTPUT_CONFIG["roi_dir"]):
-        print(f"❌ 错误：ROI 提取目录不存在 {OUTPUT_CONFIG['roi_dir']}")
-        sys.exit(1)
-
+        print(f"⚠️ 警告：ROI 提取目录不存在 {OUTPUT_CONFIG['roi_dir']}")
+        print("  提示：可能需要先执行步骤2")
+    
     process_patch_enhance(OUTPUT_CONFIG["roi_dir"], OUTPUT_CONFIG["patch_dir"])
 
-    # 第四步：执行训练任务转换
+def step4_seg2det():
+    """步骤4: 训练任务转换"""
     print("\n" + "=" * 100)
-    print("📝 执行训练任务转换")
+    print("📝 步骤4: 执行训练任务转换")
     print("=" * 100)
-
+    
     if not os.path.exists(OUTPUT_CONFIG["patch_dir"]):
-        print(f"❌ 错误：ROI 提取目录不存在 {OUTPUT_CONFIG['patch_dir']}")
-        sys.exit(1)
-
+        print(f"⚠️ 警告：patch 目录不存在 {OUTPUT_CONFIG['patch_dir']}")
+        print("  提示：可能需要先执行步骤3")
+    
     seg2det(OUTPUT_CONFIG["patch_dir"], OUTPUT_CONFIG["cls_dir"])
 
+def main():
+    # 解析命令行参数
+    args = parse_arguments()
+    
+    print("🚀 数据处理流水线启动（可控版本）！")
+    print(f"基础路径：{BASE_PATH}")
+    print(f"待处理数据集：{DATASETS}")
+    
+    # 验证步骤
+    steps = validate_steps(args.steps)
+    
+    print(f"\n📌 将要执行的步骤：{' '.join(steps)}")
+    for step in steps:
+        print(f"  {step}: {STEP_INFO[step]['name']}")
+    
+    
+    print("\n" + "=" * 100)
+    print("开始执行选定的步骤")
+    print("=" * 100)
+    
+    # 执行选定的步骤
+    for step in steps:
+        step_func_name = STEP_INFO[step]['func']
+        step_func = globals()[step_func_name]
+        
+        try:
+            step_func()
+        except Exception as e:
+            print(f"\n❌ 步骤{step}执行失败：{e}")
+            if not args.force:
+                print("终止执行（使用 --force 可以继续执行后续步骤）")
+                sys.exit(1)
+            else:
+                print("使用了 --force 参数，继续执行后续步骤")
+    
+    # 完成信息
     print("\n" + "🎉" * 50)
-    print("🎉 所有数据处理步骤执行完成！")
-    print(f"📁 最终结果保存目录：{OUTPUT_CONFIG['patch_dir']}")
+    print("🎉 所选步骤执行完成！")
+    print(f"📁 执行的步骤：{' '.join(steps)}")
+    
+    # 显示各步骤的输出目录
+    for step in steps:
+        output_key = STEP_INFO[step]['output']
+        if output_key:
+            output_dir = OUTPUT_CONFIG[output_key]
+            print(f"  步骤{step}输出：{output_dir}")
+    
     print("🎉" * 50)
-
 
 if __name__ == "__main__":
     main()
