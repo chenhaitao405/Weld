@@ -1,126 +1,105 @@
-# 焊缝检测与缺陷识别系统
+# 焊缝检测数据处理流水线
 
-## 📌 项目概述
+## 项目概述
 
-本项目提供了一套完整的焊缝X射线图像处理工具链，包括数据预处理、格式转换、区域提取和模型训练等功能，支持从原始图像到YOLO格式数据集的全流程处理。
+本项目提供了一套完整的焊缝X射线图像数据处理流水线，能够自动化执行从原始标注数据到模型训练所需格式的全流程处理。通过简单的配置和命令行参数，即可完成数据格式转换、ROI区域提取、图像裁剪增强和训练任务转换等关键步骤，大幅提高数据处理效率。
 
-## 🛠️ 核心脚本功能
+## 核心功能
 
-### 1. 数据预处理脚本
+- 自动化数据处理流水线，支持分步执行或全流程运行
+- Labelme标注格式转YOLO训练格式
+- 基于预训练模型的焊缝ROI区域自动提取
+- 图像裁剪与增强，提升模型泛化能力
+- 分割任务与检测/分类任务间的格式转换
 
-#### `WeldImagePreprocessor_withYOLO.py`
-- **功能**：按照SWRD数据集的目录结构对焊缝区域图像进行处理
-- **主要操作**：
-  - 滑窗裁剪
-  - 图像增强
-  - 标签格式转换
-  - 按YOLO格式要求组织输出目录
+## 环境要求
 
-### 2. 格式转换工具
+- Python 3.x
+- 依赖库：`tqdm`、`opencv-python`、`ultralytics`等（需自行安装）
+- 支持Windows和Linux操作系统（需在配置中正确设置路径）
 
-#### `convert/labelme2yolo.py`
-- **功能**：将LabelMe的JSON标注文件转换为YOLO格式
-- **适用场景**：通用的标注格式转换
+## 配置说明
 
-#### `convert/labelme2yolo_cj.py`
-- **功能**：专门处理长江项目的数据目录
-- **特点**：适配带有"convert"后缀的标签文件命名规则
+核心配置位于`run_data_pipeline.py`的配置区域，主要包括：
 
-### 3. ROI区域提取
+1. **路径配置**：根据操作系统自动选择数据路径、模型路径
+2. **数据集配置**：指定需要处理的数据集列表
+3. **输出目录配置**：定义各步骤输出结果的保存路径
+4. **固定参数配置**：各处理步骤的具体参数设置
 
-#### `convert/pj/yolo_roi_extractor.py`
-- **功能**：使用焊缝检测网络识别原始X射线图像中的ROI区域
-- **特性**：
-  - 自动识别焊缝区域
-  - 转换并保留原YOLO格式标签
-  - 生成仅包含焊缝区域的训练数据集
+默认配置支持的数据集：`D1`、`D2`、`D3`、`D4`、`img20250608`、`img20250609`
 
-### 4. 数据增强工具
+## 使用方法
 
-#### `convert/pj/patchandenhance.py`
-- **功能**：对YOLO格式的焊缝区域训练数据进行处理
-- **操作**：
-  - 滑动窗口裁剪
-  - 数据增强
+### 基本命令格式
 
-## 📋 使用流程
+```bash
+python run_data_pipeline.py --steps [步骤编号] [--force]
+```
 
-### 方案一：基于SWRD开源数据集训练
+### 步骤说明
 
-1. **数据预处理**
-   ```bash
-   python WeldImagePreprocessor_withYOLO.py
-   ```
-   - 执行滑窗裁剪、图像增强、标签转换
-   - 直接生成YOLO训练所需的数据格式
-   - 保存在`/home/lenovo/code/CHT/detect/dataprocess/preprocessed_data2/YOLODataset_seg/` 
+1. **Labelme转YOLO**（步骤1）
+   - 将Labelme格式的标注数据转换为YOLO训练格式
+   - 支持语义分割标签
+   - 可配置是否将所有标签统一为"crack"
 
-2. **模型训练**
-   ```bash
-   python ultralytics/SWRDCrak.py
-   ```
-   - 使用ultralytics框架进行分割模型训练
+2. **YOLO ROI提取**（步骤2）
+   - 使用预训练的焊缝检测模型提取感兴趣区域(ROI)
+   - 支持设置置信度阈值和IOU阈值
+   - 自动生成ROI区域的YOLO格式标签
 
-### 方案二：基于项目实际数据训练
+3. **图像裁剪与增强**（步骤3）
+   - 对ROI区域进行滑窗裁剪
+   - 支持窗口大小和重叠率配置
+   - 提供窗宽窗位等图像增强功能
 
-1. **焊缝检测模型训练**
-   
-   a. 转换焊缝区域检测数据集
-   ```bash
-   python convert/labelme2yolo.py --input /home/lenovo/code/CHT/datasets/Xray/labelConvert/crack
-   ```
-   
-   b. 训练焊缝检测模型
-   ```bash
-   python ultralytics/welddet.py
-   ```
+4. **训练任务转换**（步骤4）
+   - 支持从分割任务格式转换为检测或分类任务格式
+   - 灵活适配不同类型的模型训练需求
 
-2. **缺陷识别模型训练**
-   
-   a. 数据清理
-   - 手动删除 `/home/lenovo/code/CHT/datasets/Xray/labelConvert/data_out` 中的无效数据
-   
-   b. 格式转换
-   ```bash
-   python convert/labelme2yolo_cj.py --input /home/lenovo/code/CHT/datasets/Xray/labelConvert/data_out
-   ```
-   
-   c. ROI区域提取
-   ```bash
-   python convert/pj/yolo_roi_extractor.py
-   ```
-   - 使用焊缝检测模型识别缺陷标注数据集的ROI区域
-   - 生成对应的YOLO格式标签
-   
-   d. 数据增强
-   ```bash
-   python convert/pj/patchandenhance.py
-   ```
-   - 输出目录：`/home/lenovo/code/CHT/datasets/Xray/weld_patch_yolo_output`
-   
-    若训练分类网络，调用：
-   ```bash
-   python convert/pj/seg2det.py
-   ```
-   
-   e. 模型训练
-   ```bash
-   python ultralytics/crackdet.py
-   ```
-   - 训练缺陷分割模型
+### 示例用法
 
+```bash
+# 运行所有4个步骤
+python run_data_pipeline.py --steps 1234
 
+# 只运行前3个步骤
+python run_data_pipeline.py --steps 123
 
-## 🔍 数据路径说明
+# 只运行步骤2、3、4
+python run_data_pipeline.py --steps 234
 
-| 数据类型 | 路径 |
-|---------|------|
-| 焊缝检测数据集 | `/home/lenovo/code/CHT/datasets/Xray/labelConvert/crack` |
-| 缺陷标注数据集 | `/home/lenovo/code/CHT/datasets/Xray/labelConvert/data_out` |
-| 最终输出数据集 | `/home/lenovo/code/CHT/datasets/Xray/weld_patch_yolo_output` |
+# 只运行步骤1和4
+python run_data_pipeline.py --steps 14
 
-## 📝 注意事项
+# 强制运行步骤2（即使前置依赖不存在）
+python run_data_pipeline.py --steps 2 --force
+```
 
-- 在进行缺陷识别模型训练前，请确保已手动清理无效数据
-- 长江项目数据需使用专用的转换脚本 `labelme2yolo_cj.py`5yy
-- 确保ultralytics框架已正确安装并配置
+## 输出说明
+
+处理结果保存在`merge_pick`目录下，包含四个子目录：
+
+- `yolo`：步骤1的输出，YOLO格式的原始数据
+- `convert`：步骤2的输出，提取的ROI区域数据
+- `patch`：步骤3的输出，裁剪和增强后的图像
+- `cls`：步骤4的输出，转换后的分类任务数据
+
+每个步骤的输出会作为后续步骤的输入，形成完整的数据处理链路。
+
+## 注意事项
+
+- 首次运行前请确保配置区域的路径设置正确，特别是模型路径
+- 处理大型数据集时可能需要较长时间，请耐心等待
+- 若某一步骤失败，建议检查输入数据格式和完整性后再重试
+- 可通过`--force`参数强制重新执行某一步骤，但需确保相关依赖数据正确
+
+## 扩展与定制
+
+如需扩展功能，可修改以下配置：
+
+- 在`DATASETS`列表中添加新的数据集名称
+- 调整`FIXED_PARAMS`中的参数以优化处理效果
+- 修改`OUTPUT_BASE_DIR`更改输出根目录
+- 在`STEP_INFO`中添加新的处理步骤（需同时实现对应的处理函数）
