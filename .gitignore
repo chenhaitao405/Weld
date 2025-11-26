@@ -7,3 +7,4 @@
 /__pycache__
 /train/runs
 /runs
+*.pyc
