@@ -8,3 +8,4 @@
 /train/runs
 /runs
 *.pyc
+*.pt
