@@ -22,7 +22,7 @@ from utils.image_processing import (
 
 # 默认参数
 DEFAULT_OVERLAP_RATIO = 0.5
-DEFAULT_WINDOW_SIZE = 640
+DEFAULT_WINDOW_SIZE = 320
 DEFAULT_CONFIDENCE_THRESHOLD = 0.9
 DEFAULT_ALPHA = 0.25  # 降低默认透明度，让原图更清晰
 DEFAULT_ROI_MODEL_PATH = "./model/weldDetect.pt"
@@ -163,10 +163,29 @@ class SlicePredictHeatmapVisualizer:
         height, width = image.shape[:2]
         fallback_box = [(0, 0, width, height)]
 
+        # 确保ROI检测输入为3通道
+        if image.ndim == 2:
+            image_for_roi = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.ndim == 3:
+            channels = image.shape[2]
+            if channels == 1:
+                image_for_roi = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            elif channels == 4:
+                image_for_roi = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+            elif channels > 4:
+                image_for_roi = image[:, :, :3]
+            elif channels == 3:
+                image_for_roi = image
+            else:
+                # 非常规通道数，截取前三个通道
+                image_for_roi = image[:, :, :3]
+        else:
+            raise ValueError("不支持的图像维度用于ROI检测")
+
         if self.roi_detector is None:
             return fallback_box
 
-        boxes = self.roi_detector.detect_with_padding(image, (height, width))
+        boxes = self.roi_detector.detect_with_padding(image_for_roi, (height, width))
         if not boxes:
             label = image_id if image_id else "当前图像"
             print(f"  - ROI检测未发现区域（{label}），使用整图作为ROI")
@@ -362,8 +381,12 @@ class SlicePredictHeatmapVisualizer:
         # 确保原图是3通道
         if len(original_image.shape) == 2:
             original_3ch = cv2.cvtColor(original_image, cv2.COLOR_GRAY2BGR)
+        elif len(original_image.shape) == 3 and original_image.shape[2] == 4:
+            original_3ch = cv2.cvtColor(original_image, cv2.COLOR_BGRA2BGR)
+        elif len(original_image.shape) == 3:
+            original_3ch = original_image[:, :, :3].copy()
         else:
-            original_3ch = original_image.copy()
+            raise ValueError("不支持的图像通道数用于热力图叠加")
 
         # 根据显示模式处理
         if self.display_mode == 'contour':
