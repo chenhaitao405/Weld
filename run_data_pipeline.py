@@ -54,7 +54,7 @@ FIXED_PARAMS = {
     "yolo_roi_extractor": {
         "model_path": MODEL_PATH,
         "roi_conf": 0.25,
-        "roi_iou": 0.4,
+        "roi_iou": 0.45,
         "padding": 0.1,
         "mode": "seg",
         "script_path": "convert/pj/yolo_roi_extractor.py"
