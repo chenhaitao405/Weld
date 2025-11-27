@@ -34,7 +34,8 @@ class SliceClassificationPipeline:
                  alpha: float = DEFAULT_ALPHA,
                  display_mode: str = 'overlay',
                  defect_class_ids: Optional[List[int]] = None,
-                 roi_detector: Optional[WeldROIDetector] = None):
+                 roi_detector: Optional[WeldROIDetector] = None,
+                 use_full_image_if_no_roi: bool = True):
         self.model = YOLO(model_path)
         self.window_size = window_size
         self.overlap_ratio = overlap_ratio
@@ -50,24 +51,43 @@ class SliceClassificationPipeline:
         self.stride = calculate_stride(window_size, overlap_ratio)
         self.cmap = cm.get_cmap(colormap)
         self.roi_detector = roi_detector
+        self.use_full_image_if_no_roi = use_full_image_if_no_roi
 
     def detect_roi_boxes(self, image: np.ndarray,
-                         image_id: Optional[str] = None) -> List[Tuple[int, int, int, int]]:
-        """检测焊缝ROI，若失败则回退到整图"""
+                         image_id: Optional[str] = None) -> Tuple[List[Tuple[int, int, int, int]], Dict[str, Any]]:
+        """检测焊缝ROI，根据配置决定是否回退到整图"""
         height, width = image.shape[:2]
         fallback_box = [(0, 0, width, height)]
+        roi_info: Dict[str, Any] = {
+            'status': 'detected',
+            'num_rois': 0,
+            'used_full_image_fallback': False
+        }
 
         if self.roi_detector is None:
-            return fallback_box
+            roi_info['status'] = 'detector_disabled'
+            roi_info['num_rois'] = len(fallback_box)
+            roi_info['used_full_image_fallback'] = True
+            return fallback_box, roi_info
 
         image_for_roi = ensure_color(image)
         boxes = self.roi_detector.detect_with_padding(image_for_roi, (height, width))
         if not boxes:
             label = image_id if image_id else "当前图像"
-            print(f"  - ROI检测未发现区域（{label}），使用整图作为ROI")
-            return fallback_box
+            if self.use_full_image_if_no_roi:
+                print(f"  - ROI检测未发现区域（{label}），使用整图作为ROI")
+                roi_info['status'] = 'fallback_full_image'
+                roi_info['num_rois'] = len(fallback_box)
+                roi_info['used_full_image_fallback'] = True
+                return fallback_box, roi_info
 
-        return boxes
+            print(f"  - ROI检测未发现区域（{label}），跳过该图像后续推理")
+            roi_info['status'] = 'empty'
+            roi_info['num_rois'] = 0
+            return [], roi_info
+
+        roi_info['num_rois'] = len(boxes)
+        return boxes, roi_info
 
     def prepare_patch_for_classification(self, patch: np.ndarray) -> np.ndarray:
         enhanced_patch = enhance_image(patch, mode=self.enhance_mode, output_bits=8)
@@ -89,7 +109,7 @@ class SliceClassificationPipeline:
                               image: np.ndarray,
                               image_id: Optional[str] = None) -> Dict[str, Any]:
         """封装流程：ROI检测 -> 切片增强 -> 分类 -> 映射回原图"""
-        roi_boxes = self.detect_roi_boxes(image, image_id=image_id)
+        roi_boxes, roi_status = self.detect_roi_boxes(image, image_id=image_id)
 
         pipeline_result: Dict[str, Any] = {
             'image_id': image_id,
@@ -97,8 +117,13 @@ class SliceClassificationPipeline:
             'rois': [],
             'patch_predictions': [],
             'total_patches': 0,
-            'defect_patches': 0
+            'defect_patches': 0,
+            'roi_status': roi_status,
+            'skipped_due_to_missing_roi': roi_status.get('status') == 'empty'
         }
+
+        if pipeline_result['skipped_due_to_missing_roi']:
+            return pipeline_result
 
         progress_bar = None
         try:

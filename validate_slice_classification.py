@@ -14,13 +14,15 @@ Steps:
 
 import argparse
 import json
-import os
 import platform
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import cv2
+import numpy as np
+
 from convert.pj.yolo_roi_extractor import WeldROIDetector
-from utils.pipeline_utils import load_image
+from utils.pipeline_utils import FontRenderer, load_image
 from utils.slice_classification_pipeline import SliceClassificationPipeline, DEFAULT_DEFECT_CLASSES, DEFAULT_OVERLAP_RATIO, DEFAULT_WINDOW_SIZE, DEFAULT_CONFIDENCE_THRESHOLD, DEFAULT_ALPHA
 
 # 路径配置（与 run_data_pipeline.py 保持一致）
@@ -90,6 +92,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--display-mode", default="overlay",
                         choices=['overlay', 'contour', 'sparse'],
                         help="热力图显示模式（内部pipeline参数）")
+    parser.add_argument("--visualize", action="store_true",
+                        help="是否保存可视化结果（标签+热力图+验证标签）")
+    parser.add_argument("--visualize-dir", default="validation_visualizations",
+                        help="可视化输出目录，默认写入 validation_visualizations")
+    parser.add_argument("--visualize-no-colorbar", action="store_true",
+                        help="生成图像时不添加颜色条")
+    parser.add_argument("--font-path", help="可选：指定字体以正确显示中文标注")
+    parser.add_argument("--font-size", type=int, default=20,
+                        help="可视化中文字大小，默认20")
 
     parser.add_argument("--report-path", default="slice_cls_validation.json",
                         help="保存验证报告的路径（JSON）")
@@ -108,31 +119,130 @@ def build_roi_detector(args: argparse.Namespace) -> Optional[WeldROIDetector]:
     )
 
 
-def load_label_boxes(label_path: Path) -> List[Tuple[float, float, float, float]]:
-    """读取LabelMe标签并返回每个shape的边界框 (x1, y1, x2, y2)"""
+def load_label_polygons_and_boxes(label_path: Path) -> Tuple[List[Dict[str, Any]], List[Tuple[float, float, float, float]]]:
+    """读取LabelMe标签并返回多边形与边界框信息"""
     if not label_path.exists():
-        return []
+        return [], []
 
     try:
         with open(label_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except Exception as exc:
         print(f"  - 警告：无法解析标签 {label_path}: {exc}")
-        return []
+        return [], []
 
+    polygons: List[Dict[str, Any]] = []
     boxes: List[Tuple[float, float, float, float]] = []
     for shape in data.get('shapes', []):
         points = shape.get('points') or []
         if len(points) < 2:
             continue
+        pts = np.array(points, dtype=np.float32)
+        xs = pts[:, 0]
+        ys = pts[:, 1]
+        x1, x2 = float(xs.min()), float(xs.max())
+        y1, y2 = float(ys.min()), float(ys.max())
+        if x2 <= x1 or y2 <= y1:
+            continue
+        polygons.append({
+            'points': pts.astype(np.int32),
+            'label': shape.get('label', '')
+        })
+        boxes.append((x1, y1, x2, y2))
+    return polygons, boxes
 
-        xs = [p[0] for p in points]
-        ys = [p[1] for p in points]
-        x1, x2 = min(xs), max(xs)
-        y1, y2 = min(ys), max(ys)
-        if x2 > x1 and y2 > y1:
-            boxes.append((x1, y1, x2, y2))
+
+def predictions_to_boxes(predictions: Sequence[Dict[str, Any]]) -> List[Tuple[float, float, float, float]]:
+    boxes: List[Tuple[float, float, float, float]] = []
+    for pred in predictions:
+        if not pred.get('is_defect'):
+            continue
+        px, py = pred['position']
+        pw, ph = pred['size']
+        boxes.append((float(px), float(py), float(px + pw), float(py + ph)))
     return boxes
+
+
+def match_predictions_to_gt(pred_boxes: Sequence[Tuple[float, float, float, float]],
+                            gt_boxes: Sequence[Tuple[float, float, float, float]],
+                            threshold: float) -> Tuple[List[Dict[str, Any]], List[int], List[int]]:
+    matches: List[Dict[str, Any]] = []
+    matched_gt = set()
+    matched_pred = set()
+
+    for pred_idx, pred_box in enumerate(pred_boxes):
+        best_ratio = 0.0
+        best_gt_idx = None
+        for gt_idx, gt_box in enumerate(gt_boxes):
+            if gt_idx in matched_gt:
+                continue
+            inter_area = compute_intersection_area(pred_box, gt_box)
+            if inter_area <= 0:
+                continue
+            gt_area = max(0.0, gt_box[2] - gt_box[0]) * max(0.0, gt_box[3] - gt_box[1])
+            if gt_area <= 0:
+                continue
+            overlap_ratio = inter_area / gt_area
+            if overlap_ratio > best_ratio:
+                best_ratio = overlap_ratio
+                best_gt_idx = gt_idx
+
+        if best_gt_idx is not None and best_ratio >= threshold:
+            matches.append({
+                'pred_idx': pred_idx,
+                'gt_idx': best_gt_idx,
+                'overlap_ratio': best_ratio
+            })
+            matched_gt.add(best_gt_idx)
+            matched_pred.add(pred_idx)
+
+    false_preds = [idx for idx in range(len(pred_boxes)) if idx not in matched_pred]
+    false_negatives = [idx for idx in range(len(gt_boxes)) if idx not in matched_gt]
+    return matches, false_preds, false_negatives
+
+
+def draw_polygons(canvas: np.ndarray, polygons: Sequence[Dict[str, Any]], color: Tuple[int, int, int]):
+    if not polygons:
+        return
+    for poly in polygons:
+        pts = poly.get('points')
+        if pts is None or pts.size == 0:
+            continue
+        reshaped = pts.reshape((-1, 1, 2))
+        cv2.polylines(canvas, [reshaped], isClosed=True, color=color, thickness=2)
+
+
+def draw_box_with_label(canvas: np.ndarray,
+                        box: Sequence[float],
+                        text: str,
+                        color: Tuple[int, int, int],
+                        font_renderer: FontRenderer):
+    x1, y1, x2, y2 = [int(round(v)) for v in box]
+    cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+    origin = (x1 + 2, max(y1 + 18, 18))
+    font_renderer.draw(canvas, text, origin, color)
+
+
+def render_verification_overlay(canvas: np.ndarray,
+                                polygons: Sequence[Dict[str, Any]],
+                                gt_boxes: Sequence[Tuple[float, float, float, float]],
+                                merged_pred_boxes: Sequence[Tuple[float, float, float, float]],
+                                matches: Sequence[Dict[str, Any]],
+                                false_negatives: Sequence[int],
+                                font_renderer: FontRenderer):
+    draw_polygons(canvas, polygons, color=(0, 255, 255))
+    matched_pred_ids = {m['pred_idx'] for m in matches}
+
+    for idx, box in enumerate(merged_pred_boxes):
+        if idx in matched_pred_ids:
+            draw_box_with_label(canvas, box, "正确", (0, 200, 0), font_renderer)
+        else:
+            draw_box_with_label(canvas, box, "错误", (0, 0, 255), font_renderer)
+
+    for gt_idx in false_negatives:
+        if gt_idx < 0 or gt_idx >= len(gt_boxes):
+            continue
+        draw_box_with_label(canvas, gt_boxes[gt_idx], "漏检", (0, 215, 255), font_renderer)
 
 
 def compute_intersection_area(box_a: Sequence[float], box_b: Sequence[float]) -> float:
@@ -204,7 +314,11 @@ def evaluate_dataset(dataset: str,
                      label_dir: Path,
                      pipeline: SliceClassificationPipeline,
                      label_overlap_threshold: float,
-                     max_images: Optional[int]) -> Dict[str, Any]:
+                     max_images: Optional[int],
+                     visualize: bool,
+                     visualization_dir: Optional[Path],
+                     add_colorbar: bool,
+                     font_renderer: Optional[FontRenderer]) -> Dict[str, Any]:
     image_files = gather_images(image_dir, max_images)
     if not image_files:
         print(f"[{dataset}] 未找到图像，跳过。")
@@ -222,6 +336,12 @@ def evaluate_dataset(dataset: str,
     dataset_fp = 0
     dataset_gt = 0
     images_processed = 0
+    dataset_vis_dir = None
+    renderer = font_renderer
+    if visualize and visualization_dir is not None:
+        dataset_vis_dir = visualization_dir / dataset
+        if renderer is None:
+            renderer = FontRenderer(font_size=20)
 
     for image_path in image_files:
         label_path = label_dir / f"{image_path.stem}.json"
@@ -233,46 +353,40 @@ def evaluate_dataset(dataset: str,
             print(f"[{dataset}] 警告：处理 {image_path} 失败：{exc}")
             continue
 
-        gt_boxes = load_label_boxes(label_path)
-        gt_matched = set()
-
-        defect_patches = [p for p in result.get('patch_predictions', []) if p.get('is_defect')]
-        pred_boxes = []
-        for pred in defect_patches:
-            px, py = pred['position']
-            pw, ph = pred['size']
-            pred_boxes.append((px, py, px + pw, py + ph))
-
+        polygons, gt_boxes = load_label_polygons_and_boxes(label_path)
+        defect_patches = result.get('patch_predictions', [])
+        pred_boxes = predictions_to_boxes(defect_patches)
         merged_pred_boxes = merge_overlapping_boxes(pred_boxes)
-        matched_preds = 0
+        matches, false_preds, false_negatives = match_predictions_to_gt(
+            merged_pred_boxes, gt_boxes, label_overlap_threshold
+        )
 
-        for pred_box in merged_pred_boxes:
-            best_gt_idx = None
-            best_overlap_ratio = 0.0
-            for idx, gt_box in enumerate(gt_boxes):
-                if idx in gt_matched:
-                    continue
-                inter_area = compute_intersection_area(pred_box, gt_box)
-                if inter_area <= 0:
-                    continue
-                gx1, gy1, gx2, gy2 = gt_box
-                gt_area = max(0.0, gx2 - gx1) * max(0.0, gy2 - gy1)
-                if gt_area <= 0:
-                    continue
-                overlap_ratio = inter_area / gt_area
-                if overlap_ratio > best_overlap_ratio:
-                    best_overlap_ratio = overlap_ratio
-                    best_gt_idx = idx
-
-            if best_overlap_ratio >= label_overlap_threshold and best_gt_idx is not None:
-                gt_matched.add(best_gt_idx)
-                matched_preds += 1
-            else:
-                dataset_fp += 1
-
-        dataset_tp += matched_preds
+        dataset_tp += len(matches)
+        dataset_fp += len(false_preds)
         dataset_gt += len(gt_boxes)
         images_processed += 1
+
+        if visualize and dataset_vis_dir is not None and renderer is not None:
+            heatmap = pipeline.generate_heatmap(image.shape, result.get('patch_predictions', []))
+            overlay = pipeline.create_heatmap_overlay(image, heatmap, apply_gaussian_blur=True)
+            if (not add_colorbar) or heatmap.max() <= 0:
+                overlay_with_color = overlay
+            else:
+                overlay_with_color = pipeline.add_colorbar(overlay, heatmap)
+
+            render_verification_overlay(
+                overlay_with_color,
+                polygons,
+                gt_boxes,
+                merged_pred_boxes,
+                matches,
+                false_negatives,
+                renderer
+            )
+
+            dataset_vis_dir.mkdir(parents=True, exist_ok=True)
+            vis_path = dataset_vis_dir / f"{image_path.stem}_validation.jpg"
+            cv2.imwrite(str(vis_path), overlay_with_color)
 
     precision = (dataset_tp / (dataset_tp + dataset_fp)) if (dataset_tp + dataset_fp) > 0 else None
     recall = (dataset_tp / dataset_gt) if dataset_gt > 0 else None
@@ -297,6 +411,12 @@ def main():
     args = parse_args()
     image_base = Path(args.image_base)
     label_base = Path(args.label_base)
+    visualization_root: Optional[Path] = None
+    font_renderer: Optional[FontRenderer] = None
+    if args.visualize:
+        visualization_root = Path(args.visualize_dir)
+        visualization_root.mkdir(parents=True, exist_ok=True)
+        font_renderer = FontRenderer(font_path=args.font_path, font_size=args.font_size)
 
     roi_detector = build_roi_detector(args)
 
@@ -311,7 +431,8 @@ def main():
         alpha=args.alpha,
         display_mode=args.display_mode,
         defect_class_ids=args.defect_classes,
-        roi_detector=roi_detector
+        roi_detector=roi_detector,
+        use_full_image_if_no_roi=False
     )
 
     reports: List[Dict[str, Any]] = []
@@ -333,7 +454,11 @@ def main():
             label_dir=label_dir,
             pipeline=pipeline,
             label_overlap_threshold=args.label_overlap_threshold,
-            max_images=args.max_images
+            max_images=args.max_images,
+            visualize=args.visualize,
+            visualization_dir=visualization_root,
+            add_colorbar=not args.visualize_no_colorbar,
+            font_renderer=font_renderer
         )
         reports.append(report)
         global_tp += report.get("tp", 0) or 0
@@ -362,7 +487,11 @@ def main():
             "window_size": args.window_size,
             "overlap": args.overlap,
             "confidence_threshold": args.confidence_threshold,
-            "defect_classes": args.defect_classes
+            "defect_classes": args.defect_classes,
+            "use_full_image_if_no_roi": False,
+            "visualize": args.visualize,
+            "visualize_dir": str(visualization_root) if visualization_root else None,
+            "visualize_no_colorbar": args.visualize_no_colorbar
         }
     }
 
