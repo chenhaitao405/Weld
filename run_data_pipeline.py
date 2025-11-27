@@ -22,7 +22,7 @@ if platform.system() == "Windows":
 elif platform.system() == "Linux":
     BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled"
     JSON_BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled"  # 修复引号缺失问题
-    MODEL_PATH = "./model/weldDetect.pt"  #增加旋转的模型
+    MODEL_PATH = "./model/weldROI2.pt"  #增加旋转的模型
 else:
     # 其他系统（如macOS）可根据需要添加配置，这里抛出异常提醒
     raise EnvironmentError(
@@ -38,10 +38,11 @@ DATASETS = [
     "img20250608",
     "img20250609"
 ]
-OUTPUT_BASE_DIR = "labeltest"
+OUTPUT_BASE_DIR = "CLS320"
 OUTPUT_CONFIG = {
     "yolo_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"yolo"),
     "roi_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"ROI"),
+    "roi_rotate": os.path.join(BASE_PATH, OUTPUT_BASE_DIR, "ROI_rotate"),
     "patch_dir": os.path.join(BASE_PATH,OUTPUT_BASE_DIR, "patch"),
     "cls_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR, "cls")
 }
@@ -59,11 +60,14 @@ FIXED_PARAMS = {
         "mode": "seg",
         "script_path": "convert/pj/yolo_roi_extractor.py"
     },
+    "rotate_yolo": {
+        "script_path": "convert/pj/rotateYOLOdate.py"
+    },
     "patchandenhance": {
         "overlap": 0.7,
         "enhance_mode": "windowing",
-        "no_slice":True,
-        "window_size": [640, 640],
+        "no_slice":False,
+        "window_size": [320, 320],
         "label_mode": "seg",
         "script_path": "convert/pj/patchandenhance.py"
     },
@@ -88,14 +92,20 @@ STEP_INFO = {
         'output': 'roi_dir'
     },
     '3': {
-        'name': '图像裁剪与增强',
-        'func': 'step3_patch_enhance',
+        'name': 'YOLO竖图旋转',
+        'func': 'step3_rotate_yolo',
         'input': 'roi_dir',
-        'output': 'patch_dir'
+        'output': 'roi_rotate'
     },
     '4': {
+        'name': '图像裁剪与增强',
+        'func': 'step4_patch_enhance',
+        'input': 'roi_rotate',
+        'output': 'patch_dir'
+    },
+    '5': {
         'name': '训练任务转换',
-        'func': 'step4_seg2det',
+        'func': 'step5_seg2det',
         'input': 'patch_dir',
         'output': 'cls_dir'
     }
@@ -110,25 +120,26 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法：
-  python %(prog)s --steps 1234  # 运行所有4个步骤
-  python %(prog)s --steps 123   # 只运行前3个步骤
-  python %(prog)s --steps 234   # 只运行步骤2、3、4
-  python %(prog)s --steps 14    # 只运行步骤1和4
-  python %(prog)s --steps 2     # 只运行步骤2
+  python %(prog)s --steps 12345  # 运行所有5个步骤
+  python %(prog)s --steps 1234   # 只运行前4个步骤
+  python %(prog)s --steps 2345   # 只运行步骤2、3、4、5
+  python %(prog)s --steps 135    # 只运行步骤1、3、5
+  python %(prog)s --steps 2      # 只运行步骤2
   
 步骤说明：
   1: Labelme转YOLO格式
   2: YOLO ROI区域提取
-  3: 图像裁剪与增强
-  4: 训练任务转换（seg转det/cls）
+  3: YOLO竖图旋转
+  4: 图像裁剪与增强
+  5: 训练任务转换（seg转det/cls）
         """
     )
     
     parser.add_argument(
         '--steps',
         type=str,
-        default='1234',
-        help='要执行的步骤编号，如 "1234" 执行全部，"123" 执行前三步 (默认: 1234)'
+        default='12345',
+        help='要执行的步骤编号，如 "12345" 执行全部，"1234" 执行前四步 (默认: 12345)'
     )
     
     parser.add_argument(
@@ -141,7 +152,7 @@ def parse_arguments():
 
 def validate_steps(steps_str: str) -> List[str]:
     """验证并返回要执行的步骤列表"""
-    valid_steps = set('1234')
+    valid_steps = set('12345')
     steps = []
     
     for char in steps_str:
@@ -328,6 +339,17 @@ def process_roi_extractor(input_dir: str, output_dir: str):
 
     run_command(command, "YOLO ROI提取")
 
+def process_rotate_yolo(input_dir: str, output_dir: str):
+    """执行YOLO竖图旋转标准化"""
+    script_path = get_abs_path(FIXED_PARAMS["rotate_yolo"]["script_path"])
+    command = [
+        sys.executable, script_path,
+        "--input", input_dir,
+        "--output", output_dir
+    ]
+
+    run_command(command, "YOLO竖图旋转")
+
 def process_patch_enhance(input_dir: str, output_dir: str):
     """执行图像裁剪增强"""
     script_path = get_abs_path(FIXED_PARAMS["patchandenhance"]["script_path"])
@@ -390,27 +412,39 @@ def step2_roi_extractor():
     
     process_roi_extractor(OUTPUT_CONFIG["yolo_dir"], OUTPUT_CONFIG["roi_dir"])
 
-def step3_patch_enhance():
-    """步骤3: 图像裁剪与增强"""
+def step3_rotate_yolo():
+    """步骤3: YOLO竖图旋转"""
     print("\n" + "=" * 100)
-    print("📝 步骤3: 执行图像裁剪与增强")
+    print("📝 步骤3: 执行竖图旋转归一")
     print("=" * 100)
     
     if not os.path.exists(OUTPUT_CONFIG["roi_dir"]):
         print(f"⚠️ 警告：ROI 提取目录不存在 {OUTPUT_CONFIG['roi_dir']}")
         print("  提示：可能需要先执行步骤2")
     
-    process_patch_enhance(OUTPUT_CONFIG["roi_dir"], OUTPUT_CONFIG["patch_dir"])
+    process_rotate_yolo(OUTPUT_CONFIG["roi_dir"], OUTPUT_CONFIG["roi_rotate"])
 
-def step4_seg2det():
-    """步骤4: 训练任务转换"""
+def step4_patch_enhance():
+    """步骤4: 图像裁剪与增强"""
     print("\n" + "=" * 100)
-    print("📝 步骤4: 执行训练任务转换")
+    print("📝 步骤4: 执行图像裁剪与增强")
+    print("=" * 100)
+    
+    if not os.path.exists(OUTPUT_CONFIG["roi_rotate"]):
+        print(f"⚠️ 警告：ROI 旋转目录不存在 {OUTPUT_CONFIG['roi_rotate']}")
+        print("  提示：可能需要先执行步骤3")
+    
+    process_patch_enhance(OUTPUT_CONFIG["roi_rotate"], OUTPUT_CONFIG["patch_dir"])
+
+def step5_seg2det():
+    """步骤5: 训练任务转换"""
+    print("\n" + "=" * 100)
+    print("📝 步骤5: 执行训练任务转换")
     print("=" * 100)
     
     if not os.path.exists(OUTPUT_CONFIG["patch_dir"]):
         print(f"⚠️ 警告：patch 目录不存在 {OUTPUT_CONFIG['patch_dir']}")
-        print("  提示：可能需要先执行步骤3")
+        print("  提示：可能需要先执行步骤4")
     
     seg2det(OUTPUT_CONFIG["patch_dir"], OUTPUT_CONFIG["cls_dir"])
 

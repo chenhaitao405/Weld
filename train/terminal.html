@@ -1,1 +1,12 @@
  python ./train/crackseg.py --data /home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/unifyCrack/patch/dataset.yaml --name "11Xcrack_enhance_nopretrian" --batch 16 --model yolo11x-seg.yaml --epochs 1000  
+
+
+ python run_inference_pipeline.py --image-dir /home/lenovo/code/CHT/datasets/Xray/self/1120/test --roi-weights model/weldDetect.pt --seg-weights model/crackCls_seg.pt --data-config /home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/merge/convert/dataset.yaml --output-dir outputs --visualize
+  
+ 
+ python run_inference_pipeline.py --image-dir /home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/unifyCrack/yolo/images/val
+
+ --roi-weights model/weldDetect.pt --seg-weights model/crackCls_seg.pt --data-config /home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/merge/convert/dataset.yaml --output-dir outputs --visualize
+ 
+
+ python convert/pj/patchcls.py --image_dir /home/lenovo/code/CHT/datasets/Xray/self/1020 --output_dir ./outputs/cls --model_path /home/lenovo/code/CHT/detect/Weld/train/runs/classify/cls3202/weights/best.pt
