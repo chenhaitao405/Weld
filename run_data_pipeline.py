@@ -22,7 +22,7 @@ if platform.system() == "Windows":
 elif platform.system() == "Linux":
     BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled"
     JSON_BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/adjust"  # 修复引号缺失问题
-    MODEL_PATH = "/home/lenovo/code/CHT/detect/ultralytics-main/runs/detect/11m_pretrain3/weights/best.pt"
+    MODEL_PATH = "./model/weldDetect.pt"  #增加旋转的模型
 else:
     # 其他系统（如macOS）可根据需要添加配置，这里抛出异常提醒
     raise EnvironmentError(
@@ -38,7 +38,7 @@ DATASETS = [
     "img20250608",
     "img20250609"
 ]
-OUTPUT_BASE_DIR = "roi2_merge"
+OUTPUT_BASE_DIR = "roi1test_unify"
 OUTPUT_CONFIG = {
     "yolo_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"yolo"),
     "roi_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"ROI"),
@@ -48,13 +48,13 @@ OUTPUT_CONFIG = {
 FIXED_PARAMS = {
     "labelme2yolo": {
         "seg": True,
-        "unify_to_crack": False,  # 如果为True，所有标签都会被统一为crack
+        "unify_to_crack": True,  # 如果为True，所有标签都会被统一为crack
         "script_path": "convert/labelme2yolo.py"
     },
     "yolo_roi_extractor": {
         "model_path": MODEL_PATH,
         "roi_conf": 0.25,
-        "roi_iou": 0.2,
+        "roi_iou": 0.4,
         "padding": 0.1,
         "mode": "seg",
         "script_path": "convert/pj/yolo_roi_extractor.py"

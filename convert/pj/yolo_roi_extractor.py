@@ -4,7 +4,7 @@ import cv2
 import shutil
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 from tqdm import tqdm
 from ultralytics import YOLO
 
@@ -28,6 +28,100 @@ from utils import (
     read_dataset_yaml,
     update_dataset_yaml
 )
+
+
+ImageSource = Union[str, Path, np.ndarray]
+
+
+class WeldROIDetector:
+    """可复用的焊缝ROI检测器，封装YOLO推理和padding逻辑"""
+
+    def __init__(self,
+                 model_path: str,
+                 roi_conf_threshold: float = 0.25,
+                 roi_iou_threshold: float = 0.45,
+                 padding_ratio: float = 0.1):
+        self.model_path = model_path
+        self.roi_conf_threshold = roi_conf_threshold
+        self.roi_iou_threshold = roi_iou_threshold
+        self.padding_ratio = padding_ratio
+
+        print(f"加载ROI模型: {model_path}")
+        self.model = YOLO(model_path)
+
+    def detect_boxes(self, image_source: ImageSource) -> List[Tuple[int, int, int, int]]:
+        """
+        运行YOLO模型检测ROI区域
+
+        Args:
+            image_source: 图像路径或numpy数组
+
+        Returns:
+            ROI边界框列表（x1, y1, x2, y2）
+        """
+        results = self.model(
+            image_source,
+            conf=self.roi_conf_threshold,
+            iou=self.roi_iou_threshold,
+            verbose=False
+        )
+
+        roi_boxes = []
+        for result in results:
+            if result.boxes is not None:
+                boxes = result.boxes.xyxy.cpu().numpy()
+                for box in boxes:
+                    x1, y1, x2, y2 = box
+                    roi_boxes.append((int(x1), int(y1), int(x2), int(y2)))
+
+        return roi_boxes
+
+    def apply_padding(self, x1: int, y1: int, x2: int, y2: int,
+                      img_width: int, img_height: int) -> Tuple[int, int, int, int]:
+        """
+        为ROI区域添加padding并限制在图像范围内
+        """
+        if self.padding_ratio <= 0:
+            return x1, y1, x2, y2
+
+        width = x2 - x1
+        height = y2 - y1
+
+        pad_x = int(width * self.padding_ratio)
+        pad_y = int(height * self.padding_ratio)
+
+        x1_padded = max(0, x1 - pad_x)
+        y1_padded = max(0, y1 - pad_y)
+        x2_padded = min(img_width, x2 + pad_x)
+        y2_padded = min(img_height, y2 + pad_y)
+
+        return x1_padded, y1_padded, x2_padded, y2_padded
+
+    def detect_with_padding(self, image_source: ImageSource,
+                            image_shape: Optional[Tuple[int, int]] = None) -> List[Tuple[int, int, int, int]]:
+        """
+        检测ROI并应用padding
+
+        Args:
+            image_source: 图像路径或numpy数组
+            image_shape: (height, width)，当image_source为路径时需要指定
+        """
+        boxes = self.detect_boxes(image_source)
+        if not boxes:
+            return boxes
+
+        if image_shape is None:
+            if isinstance(image_source, np.ndarray):
+                img_height, img_width = image_source.shape[:2]
+            else:
+                raise ValueError("当 image_source 为路径时，必须提供 image_shape 以应用padding")
+        else:
+            img_height, img_width = image_shape
+
+        return [
+            self.apply_padding(x1, y1, x2, y2, img_width, img_height)
+            for (x1, y1, x2, y2) in boxes
+        ]
 
 
 class YOLOROIExtractor:
@@ -61,9 +155,14 @@ class YOLOROIExtractor:
         self.roi_iou_threshold = roi_iou_threshold
         self.padding_ratio = padding_ratio
 
-        # 加载YOLO模型
-        print(f"加载模型: {model_path}")
-        self.model = YOLO(model_path)
+        # 加载YOLO模型（复用可独立调用的WeldROIDetector）
+        self.roi_detector = WeldROIDetector(
+            model_path=model_path,
+            roi_conf_threshold=roi_conf_threshold,
+            roi_iou_threshold=roi_iou_threshold,
+            padding_ratio=padding_ratio
+        )
+        self.model = self.roi_detector.model  # 向后兼容
 
         # 创建输出目录结构
         create_directory_structure(self.output_dir)
@@ -98,22 +197,7 @@ class YOLOROIExtractor:
         Returns:
             ROI边界框列表 [(x1, y1, x2, y2), ...]
         """
-        results = self.model(
-            image_path,
-            conf=self.roi_conf_threshold,
-            iou=self.roi_iou_threshold,
-            verbose=False
-        )
-
-        roi_boxes = []
-        for result in results:
-            if result.boxes is not None:
-                boxes = result.boxes.xyxy.cpu().numpy()
-                for box in boxes:
-                    x1, y1, x2, y2 = box
-                    roi_boxes.append((int(x1), int(y1), int(x2), int(y2)))
-
-        return roi_boxes
+        return self.roi_detector.detect_boxes(image_path)
 
     def _add_padding(self, x1: int, y1: int, x2: int, y2: int,
                     img_width: int, img_height: int) -> Tuple[int, int, int, int]:
@@ -127,20 +211,7 @@ class YOLOROIExtractor:
         Returns:
             添加padding后的边界框
         """
-        width = x2 - x1
-        height = y2 - y1
-
-        # 计算padding
-        pad_x = int(width * self.padding_ratio)
-        pad_y = int(height * self.padding_ratio)
-
-        # 添加padding并确保不超出图像边界
-        x1_padded = max(0, x1 - pad_x)
-        y1_padded = max(0, y1 - pad_y)
-        x2_padded = min(img_width, x2 + pad_x)
-        y2_padded = min(img_height, y2 + pad_y)
-
-        return x1_padded, y1_padded, x2_padded, y2_padded
+        return self.roi_detector.apply_padding(x1, y1, x2, y2, img_width, img_height)
 
     def _process_detection_label(self, label: list, roi_x1: int, roi_y1: int,
                                 roi_x2: int, roi_y2: int,
