@@ -3,17 +3,19 @@ import sys
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
 from tqdm import tqdm
 from ultralytics import YOLO
-import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-from matplotlib.colors import Normalize
 
-# 添加项目根目录到路径（如果utils模块在当前目录）
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
+for path in {SCRIPT_DIR, PROJECT_ROOT}:
+    if str(path) not in sys.path:
+        sys.path.append(str(path))
 
-# 导入图像处理工具
+from convert.pj.yolo_roi_extractor import WeldROIDetector
 from utils.image_processing import (
     enhance_image, sliding_window_crop, calculate_stride
 )
@@ -23,6 +25,11 @@ DEFAULT_OVERLAP_RATIO = 0.5
 DEFAULT_WINDOW_SIZE = 640
 DEFAULT_CONFIDENCE_THRESHOLD = 0.9
 DEFAULT_ALPHA = 0.25  # 降低默认透明度，让原图更清晰
+DEFAULT_ROI_MODEL_PATH = "./model/weldDetect.pt"
+DEFAULT_ROI_CONFIDENCE = 0.25
+DEFAULT_ROI_IOU = 0.45
+DEFAULT_ROI_PADDING = 0.1
+DEFAULT_DEFECT_CLASSES = (0,)
 
 
 class SlicePredictHeatmapVisualizer:
@@ -37,7 +44,12 @@ class SlicePredictHeatmapVisualizer:
                  use_confidence_weight: bool = False,
                  colormap: str = 'hot',
                  alpha: float = DEFAULT_ALPHA,
-                 display_mode: str = 'overlay'):
+                 display_mode: str = 'overlay',
+                 roi_model_path: Optional[str] = DEFAULT_ROI_MODEL_PATH,
+                 roi_confidence: float = DEFAULT_ROI_CONFIDENCE,
+                 roi_iou: float = DEFAULT_ROI_IOU,
+                 roi_padding: float = DEFAULT_ROI_PADDING,
+                 defect_class_ids: Optional[List[int]] = None):
         """
         初始化处理器`
 
@@ -51,6 +63,11 @@ class SlicePredictHeatmapVisualizer:
             colormap: 热力图颜色映射（'hot', 'jet', 'turbo', 'viridis'等）
             alpha: 热力图叠加透明度（默认0.25，值越小原图越清晰）
             display_mode: 显示模式 ('overlay'=叠加, 'contour'=轮廓, 'sparse'=稀疏点)
+            roi_model_path: 焊缝ROI检测模型路径，None时跳过ROI检测
+            roi_confidence: ROI检测置信度阈值
+            roi_iou: ROI检测IOU阈值
+            roi_padding: ROI区域padding比例
+            defect_class_ids: 被视为缺陷的分类ID列表（默认0）
         """
         self.model = YOLO(model_path)
         self.window_size = window_size
@@ -61,12 +78,20 @@ class SlicePredictHeatmapVisualizer:
         self.colormap = colormap
         self.alpha = alpha
         self.display_mode = display_mode
+        self.roi_model_path = roi_model_path
+        self.roi_confidence = roi_confidence
+        self.roi_iou = roi_iou
+        self.roi_padding = roi_padding
+        self.defect_class_ids = set(
+            defect_class_ids if defect_class_ids is not None else DEFAULT_DEFECT_CLASSES
+        )
 
         # 计算步长
         self.stride = calculate_stride(window_size, overlap_ratio)
 
         # 获取颜色映射
         self.cmap = cm.get_cmap(colormap)
+        self.roi_detector: Optional[WeldROIDetector] = self._initialize_roi_detector()
 
         print(f"热力图切片预测可视化器初始化:")
         print(f"  - 模型路径: {model_path}")
@@ -78,6 +103,32 @@ class SlicePredictHeatmapVisualizer:
         print(f"  - 颜色映射: {colormap}")
         print(f"  - 透明度: {alpha}")
         print(f"  - 显示模式: {display_mode}")
+        print(f"  - ROI模型: {roi_model_path if roi_model_path else '未启用'}")
+        print(f"  - ROI参数: conf={roi_confidence}, iou={roi_iou}, padding={roi_padding}")
+        print(f"  - 缺陷类别: {sorted(self.defect_class_ids)}")
+
+    def _initialize_roi_detector(self) -> Optional[WeldROIDetector]:
+        """根据配置初始化ROI检测器"""
+        if not self.roi_model_path:
+            print("  - 未提供ROI模型，使用整图作为ROI区域")
+            return None
+
+        model_path = self.roi_model_path
+        if model_path and not os.path.exists(model_path):
+            print(f"  - ROI模型文件不存在: {model_path}，将跳过ROI检测")
+            return None
+
+        try:
+            print(f"  - 加载ROI检测模型: {model_path}")
+            return WeldROIDetector(
+                model_path=model_path,
+                roi_conf_threshold=self.roi_confidence,
+                roi_iou_threshold=self.roi_iou,
+                padding_ratio=self.roi_padding
+            )
+        except Exception as exc:  # pragma: no cover
+            print(f"  - ROI模型加载失败: {exc}，使用整图作为ROI区域")
+            return None
 
     def predict_single_patch(self, patch: np.ndarray) -> Tuple[int, float]:
         """
@@ -106,6 +157,119 @@ class SlicePredictHeatmapVisualizer:
 
         return -1, 0.0
 
+    def detect_roi_boxes(self, image: np.ndarray,
+                         image_id: Optional[str] = None) -> List[Tuple[int, int, int, int]]:
+        """检测焊缝ROI，若失败则回退到整图"""
+        height, width = image.shape[:2]
+        fallback_box = [(0, 0, width, height)]
+
+        if self.roi_detector is None:
+            return fallback_box
+
+        boxes = self.roi_detector.detect_with_padding(image, (height, width))
+        if not boxes:
+            label = image_id if image_id else "当前图像"
+            print(f"  - ROI检测未发现区域（{label}），使用整图作为ROI")
+            return fallback_box
+
+        return boxes
+
+    def prepare_patch_for_classification(self, patch: np.ndarray) -> np.ndarray:
+        """参考数据预处理流程，对patch进行增强并转换成YOLO分类可用的格式"""
+        enhanced_patch = enhance_image(patch, mode=self.enhance_mode, output_bits=8)
+        if len(enhanced_patch.shape) == 2:
+            enhanced_patch = cv2.cvtColor(enhanced_patch, cv2.COLOR_GRAY2BGR)
+        return np.ascontiguousarray(enhanced_patch)
+
+    def detect_slice_classify(self,
+                              image: np.ndarray,
+                              image_id: Optional[str] = None) -> Dict[str, Any]:
+        """封装步骤2~5：ROI检测->切片增强->分类->映射回原图"""
+        roi_boxes = self.detect_roi_boxes(image, image_id=image_id)
+
+        pipeline_result: Dict[str, Any] = {
+            'image_id': image_id,
+            'image_shape': image.shape[:2],
+            'rois': [],
+            'patch_predictions': [],
+            'total_patches': 0,
+            'defect_patches': 0
+        }
+
+        progress_bar = None
+
+        try:
+            for roi_index, (x1, y1, x2, y2) in enumerate(roi_boxes):
+                roi_width = max(0, x2 - x1)
+                roi_height = max(0, y2 - y1)
+                if roi_width <= 0 or roi_height <= 0:
+                    continue
+
+                roi_info: Dict[str, Any] = {
+                    'roi_index': roi_index,
+                    'box': {
+                        'x1': int(x1), 'y1': int(y1),
+                        'x2': int(x2), 'y2': int(y2),
+                        'width': int(roi_width), 'height': int(roi_height)
+                    },
+                    'num_patches': 0,
+                    'defect_patches': 0,
+                    'patches': []
+                }
+                pipeline_result['rois'].append(roi_info)
+
+                roi_image = image[y1:y2, x1:x2]
+                if roi_image.size == 0:
+                    continue
+
+                patches = sliding_window_crop(roi_image, self.window_size, self.stride)
+                if not patches:
+                    continue
+
+                for patch_info in patches:
+                    if progress_bar is None:
+                        progress_bar = tqdm(desc="分类切片", unit="patch", leave=False)
+
+                    prepared_patch = self.prepare_patch_for_classification(patch_info['patch'])
+                    pred_class, confidence = self.predict_single_patch(prepared_patch)
+
+                    is_defect = (
+                        pred_class in self.defect_class_ids and
+                        confidence >= self.confidence_threshold
+                    )
+
+                    rel_x, rel_y = patch_info['position']
+                    patch_width = patch_info['size'][1]
+                    patch_height = patch_info['size'][0]
+                    abs_x = int(x1 + rel_x)
+                    abs_y = int(y1 + rel_y)
+
+                    patch_result = {
+                        'roi_index': roi_index,
+                        'position': (abs_x, abs_y),
+                        'size': (int(patch_width), int(patch_height)),
+                        'relative_position': (int(rel_x), int(rel_y)),
+                        'confidence': float(confidence),
+                        'class': int(pred_class),
+                        'is_defect': bool(is_defect)
+                    }
+
+                    pipeline_result['patch_predictions'].append(patch_result)
+                    roi_info['patches'].append(patch_result)
+                    roi_info['num_patches'] += 1
+                    pipeline_result['total_patches'] += 1
+
+                    if is_defect:
+                        roi_info['defect_patches'] += 1
+                        pipeline_result['defect_patches'] += 1
+
+                    progress_bar.update(1)
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
+
+        return pipeline_result
+
     def generate_heatmap(self,
                         image_shape: Tuple[int, int],
                         predictions: List[Dict]) -> np.ndarray:
@@ -124,24 +288,35 @@ class SlicePredictHeatmapVisualizer:
         # 创建累积矩阵
         heatmap = np.zeros((height, width), dtype=np.float32)
 
-        # 对每个预测为标签0的区域进行累积
+        # 对每个预测为缺陷的切片进行累积
         for pred in predictions:
-            if pred['class'] == 0 and pred['confidence'] >= self.confidence_threshold:
-                x, y = pred['position']
-                w, h = pred['size']
+            is_defect = pred.get('is_defect')
+            if is_defect is None:
+                pred_class = pred.get('class', -1)
+                pred_conf = pred.get('confidence', 0.0)
+                is_defect = (
+                    pred_class in self.defect_class_ids and
+                    pred_conf >= self.confidence_threshold
+                )
 
-                # 确保不超出边界
-                x_end = min(x + w, width)
-                y_end = min(y + h, height)
+            if not is_defect:
+                continue
 
-                # 累加值：使用置信度或固定值1
-                if self.use_confidence_weight:
-                    increment = pred['confidence']
-                else:
-                    increment = 1.0
+            x, y = pred['position']
+            w, h = pred['size']
 
-                # 在对应区域累加
-                heatmap[y:y_end, x:x_end] += increment
+            # 确保不超出边界
+            x_end = min(x + w, width)
+            y_end = min(y + h, height)
+
+            # 累加值：使用置信度或固定值1
+            if self.use_confidence_weight:
+                increment = pred.get('confidence', 0.0)
+            else:
+                increment = 1.0
+
+            # 在对应区域累加
+            heatmap[y:y_end, x:x_end] += increment
 
         return heatmap
 
@@ -387,43 +562,15 @@ class SlicePredictHeatmapVisualizer:
         print(f"处理图像: {image_path}")
         print(f"  - 原始尺寸: {image.shape[:2]}")
 
-        # 图像增强（用于预测）
-        enhanced_image = enhance_image(image, mode=self.enhance_mode, output_bits=8)
+        classification_result = self.detect_slice_classify(image, image_id=image_path)
+        predictions = classification_result['patch_predictions']
+        roi_count = len(classification_result['rois'])
+        total_patches = classification_result['total_patches']
+        defect_patches = classification_result['defect_patches']
 
-        # 如果增强后是单通道，转换为3通道用于YOLO预测
-        if len(enhanced_image.shape) == 2:
-            enhanced_image_3ch = cv2.cvtColor(enhanced_image, cv2.COLOR_GRAY2BGR)
-        else:
-            enhanced_image_3ch = enhanced_image
-
-        # 滑动窗口裁剪
-        patches = sliding_window_crop(enhanced_image_3ch, self.window_size, self.stride)
-        print(f"  - 生成{len(patches)}个切片")
-
-        # 存储所有预测结果
-        predictions = []
-
-        # 对每个patch进行预测
-        for i, patch_info in enumerate(tqdm(patches, desc="预测切片")):
-            patch = patch_info['patch']
-            position = patch_info['position']
-            size = patch_info['size']
-
-            # 预测
-            pred_class, confidence = self.predict_single_patch(patch)
-
-            # 保存所有预测结果（后续筛选）
-            predictions.append({
-                'position': position,
-                'size': size,
-                'confidence': confidence,
-                'class': pred_class
-            })
-
-        # 统计标签0的数量
-        label0_predictions = [p for p in predictions
-                             if p['class'] == 0 and p['confidence'] >= self.confidence_threshold]
-        print(f"  - 检测到{len(label0_predictions)}个标签0区域")
+        print(f"  - ROI数量: {roi_count}")
+        print(f"  - 切片数量: {total_patches}")
+        print(f"  - 缺陷切片数量(>= {self.confidence_threshold:.2f}): {defect_patches}")
 
         # 生成热力图
         heatmap = self.generate_heatmap(image.shape, predictions)
@@ -568,6 +715,15 @@ def main():
     # 模型参数
     parser.add_argument('--model_path', type=str, required=True,
                         help='YOLO模型路径')
+    parser.add_argument('--roi_model_path', type=str,
+                        default=DEFAULT_ROI_MODEL_PATH,
+                        help='焊缝ROI检测模型路径 (默认: ./model/weldDetect.pt)')
+    parser.add_argument('--roi_conf', type=float, default=DEFAULT_ROI_CONFIDENCE,
+                        help='ROI检测置信度阈值')
+    parser.add_argument('--roi_iou', type=float, default=DEFAULT_ROI_IOU,
+                        help='ROI检测IOU阈值')
+    parser.add_argument('--roi_padding', type=float, default=DEFAULT_ROI_PADDING,
+                        help='ROI区域padding比例')
 
     # 处理参数
     parser.add_argument('--window_size', type=int, nargs=2,
@@ -582,6 +738,9 @@ def main():
     parser.add_argument('--confidence', type=float,
                         default=DEFAULT_CONFIDENCE_THRESHOLD,
                         help='置信度阈值')
+    parser.add_argument('--defect_classes', type=int, nargs='+',
+                        default=list(DEFAULT_DEFECT_CLASSES),
+                        help='被视为缺陷的分类ID (空格分隔)')
 
     # 热力图参数
     parser.add_argument('--use_confidence_weight', action='store_true',
@@ -622,7 +781,12 @@ def main():
         use_confidence_weight=args.use_confidence_weight,
         colormap=args.colormap,
         alpha=args.alpha,
-        display_mode=args.display_mode
+        display_mode=args.display_mode,
+        roi_model_path=args.roi_model_path,
+        roi_confidence=args.roi_conf,
+        roi_iou=args.roi_iou,
+        roi_padding=args.roi_padding,
+        defect_class_ids=args.defect_classes
     )
 
     # 处理图像

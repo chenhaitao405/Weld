@@ -105,7 +105,7 @@ class WeldInferencePipeline:
                  roi_conf: float = 0.25,
                  roi_iou: float = 0.45,
                  roi_padding: float = 0.1,
-                 seg_conf: float = 0.25,
+                 seg_conf: float = 0.15,
                  imgsz: int = 640,
                  device: Optional[str] = None,
                  data_config: Optional[str] = None,

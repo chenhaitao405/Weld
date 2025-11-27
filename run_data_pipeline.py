@@ -21,7 +21,7 @@ if platform.system() == "Windows":
     MODEL_PATH = "E:\CODE\weldDataProcess\model\weldDetect.pt"
 elif platform.system() == "Linux":
     BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled"
-    JSON_BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/adjust"  # 修复引号缺失问题
+    JSON_BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled"  # 修复引号缺失问题
     MODEL_PATH = "./model/weldDetect.pt"  #增加旋转的模型
 else:
     # 其他系统（如macOS）可根据需要添加配置，这里抛出异常提醒
@@ -38,7 +38,7 @@ DATASETS = [
     "img20250608",
     "img20250609"
 ]
-OUTPUT_BASE_DIR = "roi1test_unify"
+OUTPUT_BASE_DIR = "labeltest"
 OUTPUT_CONFIG = {
     "yolo_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"yolo"),
     "roi_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"ROI"),
