@@ -12,7 +12,7 @@ print(f"\n已设置字体为: AR PL UKai CN")
 from ultralytics import YOLO
 
 # 1. 加载 YOLOv11M 预训练分类模型（自动下载权重）
-model = YOLO("yolo11x-cls.yaml")  # build a new model from YAML
+model = YOLO("yolo11m-cls.yaml")  # build a new model from YAML
 
 # 2. 训练分类模型（核心参数仅保留必要项，其他默认）
 results = model.train(
@@ -21,6 +21,6 @@ results = model.train(
     batch=256,
     imgsz=224,
     workers =0,
-    name="cor_cls320", erasing=0, mosaic=0, hsv_h=0.0,
+    name="cor_cls320_balance", erasing=0, mosaic=0, hsv_h=0.0,
     hsv_s=0.0, hsv_v=0.0, auto_augment=None, scale=0
 )

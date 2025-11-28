@@ -9,4 +9,6 @@
 /runs
 *.pyc
 *.pt
+*.pth
+/outputs
 /outputs

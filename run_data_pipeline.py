@@ -73,7 +73,8 @@ FIXED_PARAMS = {
     },
     "seg2det":{
         "mode": "cls",
-        "script_path": "convert/pj/seg2det.py"
+        "script_path": "convert/pj/seg2det.py",
+        "balance_data": True
     }
 }
 
@@ -382,6 +383,9 @@ def seg2det(input_dir: str, output_dir: str):
 
     if FIXED_PARAMS["patchandenhance"]["no_slice"]:
         command.append("--no_slice")
+
+    if FIXED_PARAMS["seg2det"].get("balance_data"):
+        command.append("--balance_data")
 
     run_command(command, "训练任务转换")
 
