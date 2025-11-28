@@ -1,12 +1,12 @@
-from rfdetr import RFDETRBase
+from rfdetr import RFDETRBase ,RFDETRMedium
 
-model = RFDETRBase()
+model = RFDETRMedium()
 
 model.train(
     dataset_dir="/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/roi2_merge/coco",
-    epochs=10,
-    batch_size=4,
+    epochs=500,
+    batch_size=16,
     grad_accum_steps=4,
     lr=1e-4,
-    output_dir="./runs/detr"
+    output_dir="./runs/detrmedium"
 )
