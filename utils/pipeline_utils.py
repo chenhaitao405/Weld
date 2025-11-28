@@ -154,3 +154,51 @@ class FontRenderer:
             return ImageFont.truetype(font_path, font_size)
         except OSError:
             return None
+
+
+def _draw_text(canvas: np.ndarray,
+               text: str,
+               origin: Tuple[int, int],
+               bgr_color: Tuple[int, int, int],
+               font_renderer: Optional[FontRenderer]):
+    if font_renderer and font_renderer.available:
+        font_renderer.draw(canvas, text, origin, bgr_color)
+    else:
+        cv2.putText(canvas, text, origin,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    bgr_color, 2, lineType=cv2.LINE_AA)
+
+
+def draw_detection_instance(canvas: np.ndarray,
+                            bbox: Sequence[float],
+                            label: str,
+                            score: Optional[float],
+                            class_id: int,
+                            font_renderer: Optional[FontRenderer] = None,
+                            polygon: Optional[Sequence[Sequence[float]]] = None,
+                            color_palette: Optional[Sequence[Tuple[int, int, int]]] = None,
+                            mask_alpha: float = 0.3):
+    """在画布上绘制检测/分割实例（自动处理中文字体）。"""
+    if color_palette is None or len(color_palette) == 0:
+        color_palette = COLOR_PALETTE
+    color = color_palette[class_id % len(color_palette)]
+
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    pt1 = (x1, y1)
+    pt2 = (x2, y2)
+
+    if polygon and len(polygon) >= 3:
+        pts = np.array([
+            (int(round(px)), int(round(py)))
+            for px, py in polygon
+        ], dtype=np.int32)
+        overlay = canvas.copy()
+        cv2.fillPoly(overlay, [pts], color)
+        cv2.addWeighted(overlay, mask_alpha, canvas, 1 - mask_alpha, 0, canvas)
+        cv2.polylines(canvas, [pts], True, color, 2)
+    else:
+        cv2.rectangle(canvas, pt1, pt2, color, 2)
+
+    caption = label if score is None else f"{label}:{score:.2f}"
+    text_org = (pt1[0], max(0, pt1[1] - 5))
+    _draw_text(canvas, caption, text_org, color, font_renderer)

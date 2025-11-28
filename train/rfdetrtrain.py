@@ -8,5 +8,6 @@ model.train(
     batch_size=16,
     grad_accum_steps=4,
     lr=1e-4,
-    output_dir="./runs/detrmedium"
+    output_dir="./runs/detrmedium",
+    early_stopping =True
 )

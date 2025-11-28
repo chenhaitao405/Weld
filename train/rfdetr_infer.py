@@ -17,11 +17,12 @@ from typing import Dict, Iterable, List, Optional
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from tqdm import tqdm
 import yaml
 
-from rfdetr import RFDETRBase
+from rfdetr import RFDETRMedium #or RFDETRBASE
+from utils.pipeline_utils import FontRenderer, draw_detection_instance, ensure_color
 
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -29,20 +30,8 @@ DEFAULT_VAL_DIR = Path(
     "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/roi2_merge/det/images/val"
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_WEIGHTS = SCRIPT_DIR / "runs" / "detr" / "checkpoint_best_ema.pth"
-DEFAULT_OUTPUT = SCRIPT_DIR / "runs" / "detr" / "inference_val"
-COLOR_PALETTE = [
-    (235, 99, 71),
-    (52, 152, 219),
-    (46, 204, 113),
-    (241, 196, 15),
-    (155, 89, 182),
-    (230, 126, 34),
-    (26, 188, 156),
-    (52, 73, 94),
-    (142, 68, 173),
-    (243, 156, 18),
-]
+DEFAULT_WEIGHTS = SCRIPT_DIR / "runs" / "detrmedium" / "checkpoint_best_total.pth"
+DEFAULT_OUTPUT = SCRIPT_DIR / "runs" / "detrmedium" / "temp"
 
 
 def parse_args() -> argparse.Namespace:
@@ -138,7 +127,7 @@ def load_rgb_image(path: Path) -> Image.Image:
         return img.convert("RGB")
 
 
-def build_class_name_map_from_model(model: RFDETRBase) -> Dict[int, str]:
+def build_class_name_map_from_model(model: RFDETRMedium) -> Dict[int, str]:
     raw_names = getattr(model, "class_names", {}) or {}
     if isinstance(raw_names, dict):
         return {int(k): str(v) for k, v in raw_names.items()}
@@ -192,7 +181,7 @@ def infer_class_map_from_dataset_yaml(image_dir: Path) -> Optional[Dict[int, str
     return None
 
 
-def build_effective_class_map(args: argparse.Namespace, model: RFDETRBase) -> Dict[int, str]:
+def build_effective_class_map(args: argparse.Namespace, model: RFDETRMedium) -> Dict[int, str]:
     if args.class_names:
         return {idx: str(name) for idx, name in enumerate(args.class_names)}
     if args.categories_json:
@@ -205,19 +194,6 @@ def build_effective_class_map(args: argparse.Namespace, model: RFDETRBase) -> Di
     return build_class_name_map_from_model(model)
 
 
-def build_pil_font(font_path: Optional[Path], font_size: int) -> Optional[ImageFont.FreeTypeFont]:
-    if not font_path:
-        return None
-    if not font_path.exists():
-        print(f"[警告] 字体文件不存在，忽略: {font_path}")
-        return None
-    try:
-        return ImageFont.truetype(str(font_path), font_size)
-    except Exception as exc:
-        print(f"[警告] 无法加载字体 {font_path}: {exc}")
-        return None
-
-
 def resolve_label(class_id: int, label_map: Dict[int, str]) -> str:
     if class_id in label_map:
         return label_map[class_id]
@@ -228,65 +204,25 @@ def resolve_label(class_id: int, label_map: Dict[int, str]) -> str:
     return f"class_{class_id}"
 
 
-def draw_detections(image, detections, label_map: Dict[int, str], pil_font: Optional[ImageFont.FreeTypeFont] = None):
-    annotated = image.copy()
-    if len(detections) == 0:
-        return annotated
-
-    if pil_font:
-        annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(annotated_rgb)
-        drawer = ImageDraw.Draw(pil_img)
-        for bbox, score, cls_id in zip(
-            detections.xyxy, detections.confidence, detections.class_id
-        ):
-            color_bgr = COLOR_PALETTE[int(cls_id) % len(COLOR_PALETTE)]
-            color_rgb = (color_bgr[2], color_bgr[1], color_bgr[0])
-            x1, y1, x2, y2 = bbox.astype(int)
-            drawer.rectangle([(x1, y1), (x2, y2)], outline=color_rgb, width=3)
-
-            label = resolve_label(int(cls_id), label_map)
-            caption = f"{label} {float(score):.2f}"
-            try:
-                text_bbox = drawer.textbbox((0, 0), caption, font=pil_font)
-                text_w = text_bbox[2] - text_bbox[0]
-                text_h = text_bbox[3] - text_bbox[1]
-            except Exception:
-                text_w, text_h = pil_font.getsize(caption)
-            text_x = x1
-            text_y = max(0, y1 - text_h - 4)
-            drawer.rectangle(
-                [(text_x, text_y), (text_x + text_w + 6, text_y + text_h + 6)],
-                fill=(0, 0, 0),
-            )
-            drawer.text(
-                (text_x + 3, text_y + 3),
-                caption,
-                font=pil_font,
-                fill=color_rgb,
-            )
-        annotated = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+def draw_detections(image: np.ndarray,
+                    detections,
+                    label_map: Dict[int, str],
+                    font_renderer: Optional[FontRenderer]) -> np.ndarray:
+    annotated = ensure_color(image.copy())
+    if len(getattr(detections, "xyxy", [])) == 0:
         return annotated
 
     for bbox, score, cls_id in zip(
         detections.xyxy, detections.confidence, detections.class_id
     ):
-        color = COLOR_PALETTE[int(cls_id) % len(COLOR_PALETTE)]
-        x1, y1, x2, y2 = bbox.astype(int)
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-
         label = resolve_label(int(cls_id), label_map)
-        caption = f"{label} {float(score):.2f}"
-        text_origin = (x1, max(15, y1 - 6))
-        cv2.putText(
+        draw_detection_instance(
             annotated,
-            caption,
-            text_origin,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            color,
-            2,
-            lineType=cv2.LINE_AA,
+            bbox=bbox.tolist(),
+            label=label,
+            score=float(score),
+            class_id=int(cls_id),
+            font_renderer=font_renderer
         )
     return annotated
 
@@ -311,7 +247,7 @@ def main() -> None:
         model_kwargs["device"] = args.device
 
     print(f"加载RF-DETR模型: {args.weights}")
-    model = RFDETRBase(**model_kwargs)
+    model = RFDETRMedium(**model_kwargs)
     if args.optimize:
         import torch
 
@@ -325,7 +261,10 @@ def main() -> None:
         )
 
     class_map = build_effective_class_map(args, model)
-    text_font = build_pil_font(args.font_path, args.font_size)
+    font_renderer = FontRenderer(
+        font_path=str(args.font_path) if args.font_path else None,
+        font_size=args.font_size
+    )
     per_class_counter: Counter[int] = Counter()
     inference_records = []
 
@@ -341,7 +280,7 @@ def main() -> None:
         if image_bgr is None:
             print(f"[警告] 读取失败，跳过: {image_path}")
             continue
-        annotated = draw_detections(image_bgr, detections, class_map, text_font)
+        annotated = draw_detections(image_bgr, detections, class_map, font_renderer)
 
         try:
             rel = image_path.relative_to(args.image_dir)

@@ -21,16 +21,16 @@ def main():
                         help='数据集配置文件路径（如 crackseg.yaml）')
 
     # 可选：添加其他可配置参数（如果需要灵活调整）
-    parser.add_argument('--epochs', type=int, default=500,
+    parser.add_argument('--epochs', type=int, default=1000,
                         help='训练轮数（默认：500）')
-    parser.add_argument('--imgsz', type=int, default=320,
+    parser.add_argument('--imgsz', type=int, default=640,
                         help='输入图像尺寸（默认：320）')
     parser.add_argument('--batch', type=int, default=32,
                         help='批次大小（默认：32）')
     parser.add_argument('--name', type=str, default="crack_11m_nopretrain_lr",
                         help='训练结果保存名称（默认：crack_11m_nopretrain_lr）')
     parser.add_argument('--model_nopretrain_lr）')
-    parser.add_argument('--model', type=str, default="yolo11m-seg.yaml",
+    parser.add_argument('--model', type=str, default="yolo11x-seg.yaml",
                         help='模型配置文件路径（默认：yolo11m-seg.yaml）')
 
     # 解析参数

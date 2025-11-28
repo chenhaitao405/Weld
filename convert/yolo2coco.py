@@ -8,14 +8,14 @@ YOLO → COCO 标注转换脚本
   python convert/yolo2coco.py --input_dir /path/to/yolo_dataset --output_dir /path/to/coco_dataset
 """
 
-import os
 import sys
 import json
 import shutil
 import argparse
+import random
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Tuple, Set
+from typing import List, Dict, Tuple, Set, Optional
 
 from tqdm import tqdm
 
@@ -176,11 +176,76 @@ def _yolo_bbox_to_coco(label: List[float], img_width: int, img_height: int) -> T
     return bbox, area
 
 
+def _polygon_area(xs: List[float], ys: List[float]) -> float:
+    if len(xs) < 3 or len(xs) != len(ys):
+        return 0.0
+
+    area = 0.0
+    for idx in range(len(xs)):
+        jdx = (idx + 1) % len(xs)
+        area += xs[idx] * ys[jdx] - xs[jdx] * ys[idx]
+
+    return abs(area) / 2.0
+
+
+def _yolo_segmentation_to_coco(label: List[float],
+                               img_width: int,
+                               img_height: int) -> Tuple[List[List[float]], List[float], float]:
+    if len(label) < 7 or (len(label) - 1) % 2 != 0:
+        return [], [], 0.0
+
+    coords = label[1:]
+    abs_coords: List[float] = []
+    xs: List[float] = []
+    ys: List[float] = []
+
+    for idx in range(0, len(coords), 2):
+        x = max(0.0, min(1.0, coords[idx])) * img_width
+        y = max(0.0, min(1.0, coords[idx + 1])) * img_height
+        xs.append(x)
+        ys.append(y)
+        abs_coords.append(round(x, 6))
+        abs_coords.append(round(y, 6))
+
+    if len(xs) < 3:
+        return [], [], 0.0
+
+    x_min = max(0.0, min(xs))
+    y_min = max(0.0, min(ys))
+    x_max = min(img_width, max(xs))
+    y_max = min(img_height, max(ys))
+
+    bbox_width = max(0.0, x_max - x_min)
+    bbox_height = max(0.0, y_max - y_min)
+    if bbox_width <= 0.0 or bbox_height <= 0.0:
+        return [], [], 0.0
+
+    area = _polygon_area(xs, ys)
+    if area <= 0.0:
+        return [], [], 0.0
+
+    bbox = [
+        round(x_min, 6),
+        round(y_min, 6),
+        round(bbox_width, 6),
+        round(bbox_height, 6)
+    ]
+
+    return [abs_coords], bbox, round(area, 6)
+
+
 def _convert_split_to_coco(split_name: str,
                            split_images_dir: Path,
                            split_labels_dir: Path,
-                           target_split_dir: Path) -> Tuple[List[Dict], List[Dict]]:
-    image_files = find_image_files(str(split_images_dir))
+                           target_split_dir: Path,
+                           task: str = "det",
+                           image_subset: Optional[List[Path]] = None) -> Tuple[List[Dict], List[Dict]]:
+    label_mode = 'seg' if task == 'seg' else 'det'
+    if image_subset is not None:
+        image_files = sorted(image_subset, key=lambda p: str(p).lower())
+    else:
+        image_files = find_image_files(str(split_images_dir))
+
     coco_images: List[Dict] = []
     coco_annotations: List[Dict] = []
     image_id = 1
@@ -206,12 +271,19 @@ def _convert_split_to_coco(split_name: str,
         })
 
         label_file = split_labels_dir / f"{image_path.stem}.txt"
-        labels = read_yolo_labels(str(label_file), mode='det') if labels_available and label_file.exists() else []
+        labels = read_yolo_labels(str(label_file), mode=label_mode) if labels_available and label_file.exists() else []
 
         for label in labels:
-            bbox, area = _yolo_bbox_to_coco(label, width, height)
-            if not bbox:
-                continue
+            if task == 'seg':
+                segmentation, bbox, area = _yolo_segmentation_to_coco(label, width, height)
+                if not segmentation:
+                    continue
+                segmentation_data = segmentation
+            else:
+                bbox, area = _yolo_bbox_to_coco(label, width, height)
+                if not bbox:
+                    continue
+                segmentation_data: List[List[float]] = []
 
             coco_annotations.append({
                 "id": annotation_id,
@@ -220,7 +292,7 @@ def _convert_split_to_coco(split_name: str,
                 "bbox": bbox,
                 "area": area,
                 "iscrowd": 0,
-                "segmentation": []
+                "segmentation": segmentation_data
             })
             annotation_id += 1
 
@@ -229,7 +301,30 @@ def _convert_split_to_coco(split_name: str,
     return coco_images, coco_annotations
 
 
-def convert_yolo_to_coco_dataset(input_dir: str, output_dir: str) -> Dict[str, Dict[str, int]]:
+def _split_train_subset_for_test(image_files: List[Path],
+                                 ratio: float,
+                                 rng: random.Random) -> Tuple[List[Path], List[Path]]:
+    if not image_files or ratio <= 0.0:
+        return image_files, []
+
+    ratio = max(0.0, min(1.0, ratio))
+    test_count = int(round(len(image_files) * ratio))
+    if test_count == 0:
+        test_count = 1
+    test_count = min(test_count, len(image_files))
+
+    test_indices = set(rng.sample(range(len(image_files)), test_count))
+    train_subset = [img for idx, img in enumerate(image_files) if idx not in test_indices]
+    test_subset = [img for idx, img in enumerate(image_files) if idx in test_indices]
+
+    return train_subset, test_subset
+
+
+def convert_yolo_to_coco_dataset(input_dir: str,
+                                 output_dir: str,
+                                 task: str = "det",
+                                 test_split_ratio: float = 0.05,
+                                 split_seed: int = 42) -> Dict[str, Dict[str, int]]:
     input_path = Path(input_dir)
     if not input_path.exists():
         raise FileNotFoundError(f"输入目录不存在：{input_dir}")
@@ -241,6 +336,10 @@ def convert_yolo_to_coco_dataset(input_dir: str, output_dir: str) -> Dict[str, D
         raise FileNotFoundError(f"未找到 YOLO images 目录：{images_root}")
     if not labels_root.exists():
         print(f"⚠️ 警告：未找到 YOLO labels 目录 {labels_root}，将以空标注形式导出")
+
+    normalized_task = task.lower()
+    if normalized_task not in {"det", "seg"}:
+        raise ValueError("task 仅支持 'det' 或 'seg'")
 
     class_names = _load_class_names_for_coco(input_path, labels_root)
     if not class_names:
@@ -260,20 +359,20 @@ def convert_yolo_to_coco_dataset(input_dir: str, output_dir: str) -> Dict[str, D
     if not split_dirs:
         raise ValueError(f"{images_root} 中未找到任何 split 目录")
 
+    split_entries = [
+        (split_dir, split_dir.name, SPLIT_NAME_MAP.get(split_dir.name.lower(), split_dir.name.lower()))
+        for split_dir in split_dirs
+    ]
+    has_input_test_split = any(mapped == "test" for _, _, mapped in split_entries)
+    rng = random.Random(split_seed)
+    ratio = max(0.0, min(1.0, test_split_ratio))
+
     summary: Dict[str, Dict[str, int]] = {}
 
-    for split_dir in split_dirs:
-        raw_split = split_dir.name
-        mapped_split = SPLIT_NAME_MAP.get(raw_split.lower(), raw_split.lower())
-        target_split_dir = output_path / mapped_split
-
-        coco_images, coco_annotations = _convert_split_to_coco(
-            raw_split,
-            split_dir,
-            labels_root / raw_split,
-            target_split_dir
-        )
-
+    def _write_split_annotations(split_key: str,
+                                 target_dir: Path,
+                                 coco_images: List[Dict],
+                                 coco_annotations: List[Dict]):
         annotation_data = {
             "info": {
                 "description": "YOLO to COCO conversion",
@@ -288,30 +387,82 @@ def convert_yolo_to_coco_dataset(input_dir: str, output_dir: str) -> Dict[str, D
             "categories": categories
         }
 
-        with open(target_split_dir / "_annotations.coco.json", 'w', encoding='utf-8') as f:
-            json.dump(annotation_data, f, ensure_ascii=True, indent=2)
+        with open(target_dir / "_annotations.coco.json", 'w', encoding='utf-8') as f:
+            json.dump(annotation_data, f, ensure_ascii=False, indent=2)
 
-        summary[mapped_split] = {
+        summary[split_key] = {
             "images": len(coco_images),
             "annotations": len(coco_annotations)
         }
+
+    for split_dir, raw_split, mapped_split in split_entries:
+        labels_dir = labels_root / raw_split
+        target_split_dir = output_path / mapped_split
+
+        if mapped_split == "train" and ratio > 0.0 and not has_input_test_split:
+            train_image_files = find_image_files(str(split_dir))
+            train_subset, test_subset = _split_train_subset_for_test(train_image_files, ratio, rng)
+
+            coco_images, coco_annotations = _convert_split_to_coco(
+                mapped_split,
+                split_dir,
+                labels_dir,
+                target_split_dir,
+                task=normalized_task,
+                image_subset=train_subset
+            )
+            _write_split_annotations(mapped_split, target_split_dir, coco_images, coco_annotations)
+
+            if test_subset:
+                test_target_dir = output_path / "test"
+                coco_images_test, coco_annotations_test = _convert_split_to_coco(
+                    "test",
+                    split_dir,
+                    labels_dir,
+                    test_target_dir,
+                    task=normalized_task,
+                    image_subset=test_subset
+                )
+                _write_split_annotations("test", test_target_dir, coco_images_test, coco_annotations_test)
+            else:
+                summary.setdefault("test", {"images": 0, "annotations": 0})
+            continue
+
+        coco_images, coco_annotations = _convert_split_to_coco(
+            mapped_split,
+            split_dir,
+            labels_dir,
+            target_split_dir,
+            task=normalized_task
+        )
+        _write_split_annotations(mapped_split, target_split_dir, coco_images, coco_annotations)
 
     return summary
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="将 YOLO 检测标注转换为 COCO 标注格式",
+        description="将 YOLO 检测/分割标注转换为 COCO 标注格式，并可自动切分测试集",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument("--input_dir", required=True, help="YOLO 数据集目录（包含 images/ 与 labels/）")
     parser.add_argument("--output_dir", required=True, help="输出的 COCO 数据集目录")
+    parser.add_argument("--task", choices=["det", "seg"], default="det", help="输入 YOLO 标签类型")
+    parser.add_argument("--test_split_ratio", type=float, default=0.05,
+                        help="从 train 划入 test 的比例 (0~1)，设为 0 可跳过自动 test")
+    parser.add_argument("--split_seed", type=int, default=42, help="train→test 随机划分种子")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    summary = convert_yolo_to_coco_dataset(args.input_dir, args.output_dir)
+    summary = convert_yolo_to_coco_dataset(
+        args.input_dir,
+        args.output_dir,
+        task=args.task,
+        test_split_ratio=args.test_split_ratio,
+        split_seed=args.split_seed
+    )
 
     print("\n✅ YOLO→COCO 转换完成!")
     for split, stats in summary.items():

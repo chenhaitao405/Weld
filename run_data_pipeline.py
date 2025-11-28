@@ -39,7 +39,7 @@ DATASETS = [
     "img20250608",
     "img20250609"
 ]
-OUTPUT_BASE_DIR = "roi2_unify"
+OUTPUT_BASE_DIR = "roi2_640_merge"
 OUTPUT_CONFIG = {
     "yolo_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"yolo"),
     "roi_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"ROI"),
@@ -50,7 +50,7 @@ OUTPUT_CONFIG = {
 FIXED_PARAMS = {
     "labelme2yolo": {
         "seg": True,
-        "unify_to_crack": True,  # 如果为True，所有标签都会被统一为crack
+        "unify_to_crack": False,  # 如果为True，所有标签都会被统一为crack
         "script_path": "convert/labelme2yolo.py"
     },
     "yolo_roi_extractor": {
@@ -67,7 +67,7 @@ FIXED_PARAMS = {
     "patchandenhance": {
         "overlap": 0.7,
         "enhance_mode": "windowing",
-        "no_slice":True,
+        "no_slice":False,
         "window_size": [640, 640],
         "label_mode": "seg",
         "script_path": "convert/pj/patchandenhance.py"
@@ -430,10 +430,6 @@ def seg2det(input_dir: str, output_dir: str):
         "--output_dir", output_dir,
         "--mode", str(FIXED_PARAMS["seg2det"]["mode"]),
     ]
-
-    if FIXED_PARAMS["patchandenhance"]["no_slice"]:
-        command.append("--no_slice")
-
     if FIXED_PARAMS["seg2det"].get("balance_data"):
         command.append("--balance_data")
 

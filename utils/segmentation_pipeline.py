@@ -7,7 +7,12 @@ from ultralytics import YOLO
 
 from convert.pj.yolo_roi_extractor import WeldROIDetector
 from utils import enhance_image
-from utils.pipeline_utils import COLOR_PALETTE, FontRenderer, ensure_color, prepare_seg_input
+from utils.pipeline_utils import (
+    FontRenderer,
+    ensure_color,
+    prepare_seg_input,
+    draw_detection_instance,
+)
 
 
 def process_roi_and_segmentation(
@@ -142,26 +147,15 @@ def _draw_visualization(canvas: np.ndarray,
                         score: float,
                         class_id: int,
                         font_renderer: Optional[FontRenderer]):
-    color = COLOR_PALETTE[class_id % len(COLOR_PALETTE)]
-    pt1 = (int(bbox[0]), int(bbox[1]))
-    pt2 = (int(bbox[2]), int(bbox[3]))
-
-    if polygon and len(polygon) >= 3:
-        pts = np.array(polygon, dtype=np.int32)
-        overlay = canvas.copy()
-        cv2.fillPoly(overlay, [pts], color)
-        cv2.addWeighted(overlay, 0.3, canvas, 0.7, 0, canvas)
-        cv2.polylines(canvas, [pts], True, color, 2)
-    else:
-        cv2.rectangle(canvas, pt1, pt2, color, 2)
-
-    caption = f"{label}:{score:.2f}"
-    text_org = (pt1[0], max(0, pt1[1] - 5))
-    if font_renderer and font_renderer.available:
-        font_renderer.draw(canvas, caption, text_org, color)
-    else:
-        cv2.putText(canvas, caption, text_org,
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, lineType=cv2.LINE_AA)
+    draw_detection_instance(
+        canvas,
+        bbox=bbox,
+        label=label,
+        score=score,
+        class_id=class_id,
+        font_renderer=font_renderer,
+        polygon=polygon
+    )
 
 
 def _class_name(class_id: int, class_names: Sequence[str]) -> str:

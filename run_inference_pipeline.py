@@ -7,7 +7,7 @@ Weld inference entry point.
 Features:
     1. Batch load weld inspection images from a directory
     2. Run ROI detection to focus on weld seams
-    3. Apply either segmentation (YOLO mask) or slice classification (sliding window heatmap)
+    3. Apply segmentation (YOLO mask), RF-DETR detection, or slice classification (sliding window heatmap)
     4. Map results back to the original image and optionally create visualizations
 """
 
@@ -29,6 +29,10 @@ from convert.pj.yolo_roi_extractor import WeldROIDetector  # noqa: E402
 from utils import read_dataset_yaml  # noqa: E402
 from utils.pipeline_utils import FontRenderer, load_image  # noqa: E402
 from utils.segmentation_pipeline import process_roi_and_segmentation  # noqa: E402
+from utils.detection_pipeline import (  # noqa: E402
+    RFDetrDetectionModel,
+    process_roi_and_detection as process_rfdet_detection
+)
 from utils.slice_classification_pipeline import (  # noqa: E402
     SliceClassificationPipeline, DEFAULT_ALPHA as CLS_DEFAULT_ALPHA,
     DEFAULT_CONFIDENCE_THRESHOLD as CLS_DEFAULT_CONF,
@@ -41,19 +45,28 @@ from utils.slice_classification_pipeline import (  # noqa: E402
 SUPPORTED_IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
 
 
+def _load_names_from_yaml(data_config: Optional[str]) -> List[str]:
+    names: List[str] = []
+    if not data_config:
+        return names
+
+    yaml_path = Path(data_config)
+    if not yaml_path.exists():
+        return names
+
+    cfg = read_dataset_yaml(str(yaml_path))
+    yaml_names = cfg.get('names')
+    if isinstance(yaml_names, dict):
+        sorted_items = sorted(yaml_names.items(), key=lambda kv: int(kv[0]))
+        names = [item[1] for item in sorted_items]
+    elif isinstance(yaml_names, list):
+        names = yaml_names
+    return names
+
+
 def _load_class_names(data_config: Optional[str], seg_model: YOLO) -> List[str]:
     """优先从dataset.yaml读取类别名称，否则回退到模型自带names"""
-    names: List[str] = []
-    if data_config:
-        yaml_path = Path(data_config)
-        if yaml_path.exists():
-            cfg = read_dataset_yaml(str(yaml_path))
-            yaml_names = cfg.get('names')
-            if isinstance(yaml_names, dict):
-                sorted_items = sorted(yaml_names.items(), key=lambda kv: int(kv[0]))
-                names = [item[1] for item in sorted_items]
-            elif isinstance(yaml_names, list):
-                names = yaml_names
+    names: List[str] = _load_names_from_yaml(data_config)
     if not names and hasattr(seg_model, 'names'):
         model_names = seg_model.names
         if isinstance(model_names, dict):
@@ -65,20 +78,20 @@ def _load_class_names(data_config: Optional[str], seg_model: YOLO) -> List[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="焊缝缺陷推理脚本（支持分割和切片分类模式）"
+        description="焊缝缺陷推理脚本（支持分割/检测/切片分类模式）"
     )
     parser.add_argument("--image-dir", required=True, help="待推理图像目录")
     parser.add_argument("--output-dir", default="inference_outputs", help="输出目录")
     parser.add_argument("--results-json", default="inference_results.json",
                         help="结果JSON文件名（相对output_dir）")
-    parser.add_argument("--mode", choices=["seg", "cls"], default="seg",
-                        help="推理模式：seg=分割，cls=切片分类/热力图")
+    parser.add_argument("--mode", choices=["seg", "det", "cls"], default="seg",
+                        help="推理模式：seg=分割，det=RF-DETR检测，cls=切片分类/热力图")
     parser.add_argument("--visualize", action="store_true", help="是否保存可视化结果")
     parser.add_argument("--visualize-dir", help="可视化输出目录（默认在output_dir下）")
     parser.add_argument("--max-images", type=int, help="最多处理的图像数")
 
     # ROI配置
-    parser.add_argument("--roi-weights", help="ROI检测权重（分割模式必填）")
+    parser.add_argument("--roi-weights", help="ROI检测权重（seg/det模式必填）")
     parser.add_argument("--roi-conf", type=float, default=0.25, help="ROI检测置信度阈值")
     parser.add_argument("--roi-iou", type=float, default=0.45, help="ROI检测IoU阈值")
     parser.add_argument("--roi-padding", type=float, default=0.1, help="ROI外扩比例")
@@ -95,6 +108,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seg-conf", type=float, default=0.25, help="分割置信度阈值")
     parser.add_argument("--imgsz", type=int, default=640, help="分割模型输入尺寸")
     parser.add_argument("--device", help="推理设备（如0, cuda:0, cpu）")
+
+    # 检测模式参数（RF-DETR）
+    parser.add_argument("--det-weights", help="RF-DETR检测权重（mode=det时必填）")
+    parser.add_argument("--det-confidence", type=float, default=0.25,
+                        help="RF-DETR检测置信度阈值")
+    parser.add_argument("--det-device", help="RF-DETR推理设备（如cuda:0, cpu）")
+    parser.add_argument("--det-optimize", action="store_true",
+                        help="是否对RF-DETR执行推理优化")
+    parser.add_argument("--det-optimize-batch", type=int, default=1,
+                        help="RF-DETR优化推理时的batch size")
+    parser.add_argument("--det-use-half", action="store_true",
+                        help="RF-DETR优化时使用float16")
+    parser.add_argument("--det-class-names", nargs='+',
+                        help="RF-DETR类别名称列表（按类别ID顺序）")
 
     # 切片分类模式参数
     parser.add_argument("--cls-weights", help="切片分类模型权重（mode=cls时必填）")
@@ -199,6 +226,59 @@ def run_segmentation_mode(args: argparse.Namespace,
     return results
 
 
+def run_detection_mode(args: argparse.Namespace,
+                       image_paths: List[Path],
+                       roi_detector: WeldROIDetector,
+                       visualization_dir: Optional[Path],
+                       font_renderer: FontRenderer) -> List[Dict[str, Any]]:
+    if not args.det_weights:
+        raise ValueError("det模式需要提供 --det-weights")
+    if roi_detector is None:
+        raise ValueError("det模式必须提供 --roi-weights 以执行ROI检测")
+
+    class_names = args.det_class_names or _load_names_from_yaml(args.data_config)
+    detection_model = RFDetrDetectionModel(
+        model_path=args.det_weights,
+        confidence=args.det_confidence,
+        device=args.det_device,
+        optimize=args.det_optimize,
+        optimize_batch=args.det_optimize_batch,
+        use_half=args.det_use_half,
+        class_names=class_names
+    )
+
+    results: List[Dict[str, Any]] = []
+
+    for image_path in tqdm(image_paths, desc="推理中"):
+        try:
+            image = load_image(image_path)
+            rois, vis_path = process_rfdet_detection(
+                image=image,
+                image_path=image_path,
+                roi_detector=roi_detector,
+                detection_model=detection_model,
+                enhance_mode=args.enhance_mode,
+                visualize=args.visualize,
+                visualization_dir=visualization_dir if args.visualize else None,
+                font_renderer=font_renderer
+            )
+
+            h, w = image.shape[:2]
+            results.append({
+                "mode": "det",
+                "image_path": str(image_path),
+                "width": w,
+                "height": h,
+                "num_rois": len(rois),
+                "rois": rois,
+                "visualization": vis_path
+            })
+        except Exception as exc:
+            print(f"[警告] 处理 {image_path} 时出错: {exc}")
+
+    return results
+
+
 def run_classification_mode(args: argparse.Namespace,
                             image_paths: List[Path],
                             roi_detector: Optional[WeldROIDetector],
@@ -267,15 +347,17 @@ def main():
     image_paths = collect_images(image_dir, args.max_images)
     roi_detector = build_roi_detector(args)
 
-    if args.mode == "seg" and roi_detector is None:
-        raise ValueError("seg模式必须提供 --roi-weights 以执行ROI检测")
+    if args.mode in {"seg", "det"} and roi_detector is None:
+        raise ValueError(f"{args.mode} 模式必须提供 --roi-weights 以执行ROI检测")
 
     font_renderer = FontRenderer(font_path=args.font_path, font_size=args.font_size)
 
     if args.mode == "seg":
         results = run_segmentation_mode(args, image_paths, roi_detector, visualization_dir, font_renderer)
-    else:
+    elif args.mode == "cls":
         results = run_classification_mode(args, image_paths, roi_detector, visualization_dir if args.visualize else None)
+    else:
+        results = run_detection_mode(args, image_paths, roi_detector, visualization_dir, font_renderer)
 
     results_path = Path(args.results_json)
     if not results_path.is_absolute():
