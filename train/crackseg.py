@@ -23,8 +23,8 @@ def main():
     # 可选：添加其他可配置参数（如果需要灵活调整）
     parser.add_argument('--epochs', type=int, default=500,
                         help='训练轮数（默认：500）')
-    parser.add_argument('--imgsz', type=int, default=640,
-                        help='输入图像尺寸（默认：640）')
+    parser.add_argument('--imgsz', type=int, default=320,
+                        help='输入图像尺寸（默认：320）')
     parser.add_argument('--batch', type=int, default=32,
                         help='批次大小（默认：32）')
     parser.add_argument('--name', type=str, default="crack_11m_nopretrain_lr",

@@ -12,6 +12,7 @@ import platform
 from tqdm import tqdm
 import shutil
 import argparse
+import copy
 
 # ========================= 配置区域 =========================
 # 根据操作系统自动选择路径
@@ -21,7 +22,7 @@ if platform.system() == "Windows":
     MODEL_PATH = "E:\CODE\weldDataProcess\model\weldDetect.pt"
 elif platform.system() == "Linux":
     BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled"
-    JSON_BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled"  # 修复引号缺失问题
+    JSON_BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/adjust"  # 修复引号缺失问题
     MODEL_PATH = "./model/weldROI2.pt"  #增加旋转的模型
 else:
     # 其他系统（如macOS）可根据需要添加配置，这里抛出异常提醒
@@ -38,13 +39,13 @@ DATASETS = [
     "img20250608",
     "img20250609"
 ]
-OUTPUT_BASE_DIR = "CLS320"
+OUTPUT_BASE_DIR = "roi2_unify"
 OUTPUT_CONFIG = {
     "yolo_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"yolo"),
     "roi_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"ROI"),
     "roi_rotate": os.path.join(BASE_PATH, OUTPUT_BASE_DIR, "ROI_rotate"),
     "patch_dir": os.path.join(BASE_PATH,OUTPUT_BASE_DIR, "patch"),
-    "cls_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR, "cls")
+    "cls_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR, "det")
 }
 FIXED_PARAMS = {
     "labelme2yolo": {
@@ -66,16 +67,59 @@ FIXED_PARAMS = {
     "patchandenhance": {
         "overlap": 0.7,
         "enhance_mode": "windowing",
-        "no_slice":False,
-        "window_size": [320, 320],
+        "no_slice":True,
+        "window_size": [640, 640],
         "label_mode": "seg",
         "script_path": "convert/pj/patchandenhance.py"
     },
     "seg2det":{
-        "mode": "cls",
-        "script_path": "convert/pj/seg2det.py"
+        "mode": "det",
+        "script_path": "convert/pj/seg2det.py",
+        "balance_data": True
     }
 }
+
+PARAM_LOG_PATH = os.path.join(BASE_PATH, OUTPUT_BASE_DIR, "pipeline_params.json")
+PARAM_LOG = {
+    "base_path": BASE_PATH,
+    "json_base_path": JSON_BASE_PATH,
+    "datasets": list(DATASETS),
+    "output_base_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR),
+    "selected_steps": [],
+    "commands": []
+}
+
+def _ensure_log_dir():
+    os.makedirs(os.path.dirname(PARAM_LOG_PATH), exist_ok=True)
+
+def save_param_log():
+    """持久化流水线参数记录"""
+    _ensure_log_dir()
+    with open(PARAM_LOG_PATH, 'w', encoding='utf-8') as f:
+        json.dump(PARAM_LOG, f, ensure_ascii=False, indent=2)
+
+def log_command(step_name: str, command: List[str], param_key: str = None,
+                extra_info: Dict = None):
+    """记录脚本调用及其输入参数"""
+    arguments = command[2:] if len(command) > 2 else []
+    params = {}
+    if param_key and param_key in FIXED_PARAMS:
+        params = copy.deepcopy(FIXED_PARAMS[param_key])
+        params.pop("script_path", None)
+
+    entry = {
+        "step": step_name,
+        "arguments": arguments,
+    }
+
+    if params:
+        entry["params"] = params
+
+    if extra_info:
+        entry["extra"] = extra_info
+
+    PARAM_LOG["commands"].append(entry)
+    save_param_log()
 
 # 定义步骤信息
 STEP_INFO = {
@@ -295,10 +339,17 @@ def process_labelme2yolo_unified(datasets: List[str], base_path: str,
             command.append("--seg")
 
         # 执行转换
-        run_command(command, f"Labelme转YOLO - {dataset}")
+        run_command(
+            command,
+            f"Labelme转YOLO - {dataset}",
+            param_key="labelme2yolo",
+            extra_info={"dataset": dataset}
+        )
 
-def run_command(command: List[str], step_name: str):
+def run_command(command: List[str], step_name: str, param_key: str = None,
+                extra_info: Dict = None):
     """执行命令"""
+    log_command(step_name, command, param_key, extra_info)
     print(f"\n{'=' * 80}")
     print(f"📌 正在执行【{step_name}】")
     print(f"命令：{' '.join(command)}")
@@ -337,7 +388,7 @@ def process_roi_extractor(input_dir: str, output_dir: str):
         "--mode", FIXED_PARAMS["yolo_roi_extractor"]["mode"]
     ]
 
-    run_command(command, "YOLO ROI提取")
+    run_command(command, "YOLO ROI提取", param_key="yolo_roi_extractor")
 
 def process_rotate_yolo(input_dir: str, output_dir: str):
     """执行YOLO竖图旋转标准化"""
@@ -348,7 +399,7 @@ def process_rotate_yolo(input_dir: str, output_dir: str):
         "--output", output_dir
     ]
 
-    run_command(command, "YOLO竖图旋转")
+    run_command(command, "YOLO竖图旋转", param_key="rotate_yolo")
 
 def process_patch_enhance(input_dir: str, output_dir: str):
     """执行图像裁剪增强"""
@@ -368,7 +419,7 @@ def process_patch_enhance(input_dir: str, output_dir: str):
     if FIXED_PARAMS["patchandenhance"]["no_slice"]:
         command.append("--no_slice")
 
-    run_command(command, "图像裁剪与增强")
+    run_command(command, "图像裁剪与增强", param_key="patchandenhance")
 
 def seg2det(input_dir: str, output_dir: str):
     """执行训练任务转换"""
@@ -383,7 +434,10 @@ def seg2det(input_dir: str, output_dir: str):
     if FIXED_PARAMS["patchandenhance"]["no_slice"]:
         command.append("--no_slice")
 
-    run_command(command, "训练任务转换")
+    if FIXED_PARAMS["seg2det"].get("balance_data"):
+        command.append("--balance_data")
+
+    run_command(command, "训练任务转换", param_key="seg2det")
 
 # =================== 步骤执行函数 ===================
 
@@ -458,6 +512,8 @@ def main():
     
     # 验证步骤
     steps = validate_steps(args.steps)
+    PARAM_LOG["selected_steps"] = list(steps)
+    save_param_log()
     
     print(f"\n📌 将要执行的步骤：{' '.join(steps)}")
     for step in steps:

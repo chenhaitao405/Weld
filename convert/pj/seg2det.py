@@ -21,6 +21,7 @@ import os
 import sys
 import argparse
 import shutil
+import random
 from pathlib import Path
 from tqdm import tqdm
 
@@ -48,7 +49,8 @@ from utils.constants import IMAGE_EXTENSIONS
 class YOLOFormatConverter:
     """YOLO格式转换器"""
 
-    def __init__(self, input_dir: str, output_dir: str, mode: str = 'det'):
+    def __init__(self, input_dir: str, output_dir: str, mode: str = 'det',
+                 balance_data: bool = False):
         """
         初始化转换器
 
@@ -56,10 +58,12 @@ class YOLOFormatConverter:
             input_dir: 输入数据集目录
             output_dir: 输出数据集目录
             mode: 转换模式 ('det' 或 'cls')
+            balance_data: 是否在分类模式下执行数据平衡
         """
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.mode = mode
+        self.balance_data = balance_data
 
         # 验证输入目录
         if not self.input_dir.exists():
@@ -153,6 +157,9 @@ class YOLOFormatConverter:
         """转换为检测格式"""
         print("开始转换为检测格式...")
 
+        if self.balance_data:
+            print("⚠️ 数据平衡仅支持分类模式，当前为检测模式，已忽略该选项。")
+
         # 创建输出目录结构
         create_directory_structure(self.output_dir)
 
@@ -174,6 +181,8 @@ class YOLOFormatConverter:
     def convert_to_cls(self):
         """转换为分类格式"""
         print("开始转换为分类格式...")
+        if self.balance_data:
+            print("⚖️ 已启用数据平衡，转换完成后将对各类别数量进行对齐。")
 
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -195,7 +204,12 @@ class YOLOFormatConverter:
             print(f"\n处理{split}集...")
             self._process_split_to_cls(split)
 
+            if self.balance_data:
+                self._balance_class_distribution(split)
+
         # 打印统计信息
+        if self.balance_data:
+            self._recalculate_statistics()
         self._print_statistics()
 
     def _copy_images(self):
@@ -341,6 +355,83 @@ class YOLOFormatConverter:
                 for class_name, count in sorted(classes.items()):
                     print(f"    - {class_name}: {count}个图像")
 
+    def _balance_class_distribution(self, split: str):
+        """在分类模式下对指定split的类别数量进行平衡"""
+        split_output_dir = self.output_dir / split
+        if not split_output_dir.exists():
+            print(f"  ⚠️ 数据平衡: 未找到{split}输出目录，跳过。")
+            return
+
+        class_dirs = [d for d in split_output_dir.iterdir() if d.is_dir()]
+        class_files = {}
+        for class_dir in class_dirs:
+            files = [
+                f for f in class_dir.iterdir()
+                if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
+            ]
+            if files:
+                class_files[class_dir] = files
+
+        if len(class_files) < 2:
+            print(f"  ⚖️ 数据平衡: {split} 可用类别不足，无需调整。")
+            return
+
+        counts = {cls_dir.name: len(files) for cls_dir, files in class_files.items()}
+        min_count = min(counts.values())
+        max_count = max(counts.values())
+
+        if min_count == max_count:
+            print(f"  ⚖️ 数据平衡: {split} 已平衡，各类别均为 {min_count} 张。")
+            return
+
+        rng = random.Random(42)
+        removed_total = 0
+        for class_dir, files in class_files.items():
+            if len(files) <= min_count:
+                continue
+            rng.shuffle(files)
+            for file_path in files[min_count:]:
+                try:
+                    file_path.unlink()
+                    removed_total += 1
+                except OSError as exc:
+                    print(f"    ⚠️ 无法删除 {file_path}: {exc}")
+
+        print(f"  ⚖️ 数据平衡: {split} 已统一为每类 {min_count} 张，移除 {removed_total} 张。")
+
+    def _recalculate_statistics(self):
+        """重新统计分类模式下的数量信息"""
+        self.total_converted = 0
+        self.total_with_labels = 0
+        self.total_without_labels = 0
+        self.class_distribution = {}
+
+        for split_dir in self.output_dir.iterdir():
+            if not split_dir.is_dir():
+                continue
+
+            for class_dir in split_dir.iterdir():
+                if not class_dir.is_dir():
+                    continue
+
+                files = [
+                    f for f in class_dir.iterdir()
+                    if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
+                ]
+                num_files = len(files)
+                if num_files == 0:
+                    continue
+
+                self.total_converted += num_files
+                if class_dir.name == 'none':
+                    self.total_without_labels += num_files
+                else:
+                    self.total_with_labels += num_files
+                    split_name = split_dir.name
+                    if split_name not in self.class_distribution:
+                        self.class_distribution[split_name] = {}
+                    self.class_distribution[split_name][class_dir.name] = num_files
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -367,6 +458,8 @@ def main():
                         help='转换模式: "det"(检测) 或 "cls"(分类) (默认: det)')
     parser.add_argument('--no_copy_images', action='store_true',
                         help='不复制图像到输出目录 (仅对det模式有效)')
+    parser.add_argument('--balance_data', action='store_true',
+                        help='在分类模式下启用类别数量平衡')
 
     args = parser.parse_args()
 
@@ -374,7 +467,8 @@ def main():
     converter = YOLOFormatConverter(
         input_dir=args.input_dir,
         output_dir=args.output_dir,
-        mode=args.mode
+        mode=args.mode,
+        balance_data=args.balance_data
     )
 
     # 根据模式执行转换
