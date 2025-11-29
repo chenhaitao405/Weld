@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -107,11 +108,8 @@ def _to_relative_url(validation_dir: Path, html_dir: Path, rel_path: str | None)
     if not rel_path:
         return None
     abs_path = (validation_dir / rel_path).resolve()
-    try:
-        rel_to_html = abs_path.relative_to(html_dir)
-    except ValueError:
-        rel_to_html = abs_path
-    return rel_to_html.as_posix()
+    rel_to_html = os.path.relpath(abs_path, html_dir)
+    return Path(rel_to_html).as_posix()
 
 
 def build_html(title: str,
