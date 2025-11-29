@@ -9,8 +9,11 @@ from convert.pj.yolo_roi_extractor import WeldROIDetector
 from utils import enhance_image
 from utils.pipeline_utils import (
     FontRenderer,
+    align_roi_orientation,
     ensure_color,
     prepare_seg_input,
+    restore_bbox_from_rotation,
+    restore_polygon_from_rotation,
     draw_detection_instance,
 )
 
@@ -44,7 +47,8 @@ def process_roi_and_segmentation(
         if roi_patch.size == 0:
             continue
 
-        enhanced_roi = enhance_image(roi_patch, mode=enhance_mode)
+        aligned_roi, rotation_meta = align_roi_orientation(roi_patch)
+        enhanced_roi = enhance_image(aligned_roi, mode=enhance_mode)
         seg_input = prepare_seg_input(enhanced_roi)
 
         seg_outputs = seg_model.predict(
@@ -61,7 +65,8 @@ def process_roi_and_segmentation(
             offset_y=y1,
             class_names=class_names,
             vis_image=vis_image,
-            font_renderer=font_renderer
+            font_renderer=font_renderer,
+            rotation_meta=rotation_meta
         )
 
         roi_results.append({
@@ -86,7 +91,8 @@ def _extract_defects(seg_outputs: Sequence[Any],
                      offset_y: int,
                      class_names: Sequence[str],
                      vis_image: Optional[np.ndarray],
-                     font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
+                     font_renderer: Optional[FontRenderer],
+                     rotation_meta: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """解析分割输出，并可选绘制到可视化画布"""
     defects: List[Dict[str, Any]] = []
 
@@ -102,18 +108,21 @@ def _extract_defects(seg_outputs: Sequence[Any],
         for idx, box in enumerate(boxes):
             class_id = int(classes[idx])
             confidence = float(confidences[idx])
+            bbox_local = [float(box[0]), float(box[1]), float(box[2]), float(box[3])]
+            bbox_local = restore_bbox_from_rotation(bbox_local, rotation_meta)
             bbox = [
-                float(box[0] + offset_x),
-                float(box[1] + offset_y),
-                float(box[2] + offset_x),
-                float(box[3] + offset_y)
+                float(bbox_local[0] + offset_x),
+                float(bbox_local[1] + offset_y),
+                float(bbox_local[2] + offset_x),
+                float(bbox_local[3] + offset_y)
             ]
 
             polygon_points: List[List[float]] = []
             if polygons and idx < len(polygons) and polygons[idx] is not None:
+                restored_polygon = restore_polygon_from_rotation(polygons[idx], rotation_meta)
                 polygon_points = [
                     [float(pt[0] + offset_x), float(pt[1] + offset_y)]
-                    for pt in polygons[idx]
+                    for pt in restored_polygon
                 ]
 
             class_name = _class_name(class_id, class_names)

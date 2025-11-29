@@ -10,7 +10,13 @@ from PIL import Image
 from convert.pj.yolo_roi_extractor import WeldROIDetector
 from rfdetr import RFDETRMedium
 from utils import enhance_image
-from utils.pipeline_utils import FontRenderer, ensure_color, draw_detection_instance
+from utils.pipeline_utils import (
+    FontRenderer,
+    align_roi_orientation,
+    ensure_color,
+    restore_bbox_from_rotation,
+    draw_detection_instance
+)
 
 
 class RFDetrDetectionModel:
@@ -114,7 +120,7 @@ def process_roi_and_detection(
         if roi_patch.size == 0:
             continue
 
-        aligned_roi, rotation_meta = _align_roi_orientation(roi_patch)
+        aligned_roi, rotation_meta = align_roi_orientation(roi_patch)
         enhanced_roi = enhance_image(aligned_roi, mode=enhance_mode, output_bits=8)
         prepared_roi = ensure_color(enhanced_roi)
         detections = detection_model.predict_patch(prepared_roi)
@@ -158,19 +164,6 @@ def process_roi_and_detection(
     return roi_results, vis_path
 
 
-def _align_roi_orientation(roi_patch: np.ndarray) -> Tuple[np.ndarray, Optional[Dict[str, Any]]]:
-    """Rotate tall ROIs to landscape to match RF-DETR training pipeline."""
-    height, width = roi_patch.shape[:2]
-    if height > width:
-        rotated = cv2.rotate(roi_patch, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        return rotated, {
-            "rotation": "ccw90",
-            "orig_width": width,
-            "orig_height": height
-        }
-    return roi_patch, None
-
-
 def _restore_detections_from_alignment(detections: List[Dict[str, Any]],
                                        rotation_meta: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not rotation_meta:
@@ -179,32 +172,9 @@ def _restore_detections_from_alignment(detections: List[Dict[str, Any]],
     restored: List[Dict[str, Any]] = []
     for det in detections:
         new_det = det.copy()
-        new_det["bbox"] = _restore_bbox_from_rotation(det["bbox"], rotation_meta)
+        new_det["bbox"] = restore_bbox_from_rotation(det["bbox"], rotation_meta)
         restored.append(new_det)
     return restored
-
-
-def _restore_bbox_from_rotation(bbox: Sequence[float], rotation_meta: Dict[str, Any]) -> List[float]:
-    if rotation_meta.get("rotation") != "ccw90":
-        return list(bbox)
-
-    orig_width = float(rotation_meta["orig_width"])
-    corners = [
-        (bbox[0], bbox[1]),
-        (bbox[2], bbox[1]),
-        (bbox[2], bbox[3]),
-        (bbox[0], bbox[3])
-    ]
-    restored_pts = [_rotate_point_from_ccw90(x, y, orig_width) for x, y in corners]
-    xs = [pt[0] for pt in restored_pts]
-    ys = [pt[1] for pt in restored_pts]
-    return [min(xs), min(ys), max(xs), max(ys)]
-
-
-def _rotate_point_from_ccw90(x_rot: float, y_rot: float, orig_width: float) -> Tuple[float, float]:
-    orig_x = orig_width - 1.0 - y_rot
-    orig_y = x_rot
-    return float(orig_x), float(orig_y)
 
 
 def resolve_label(class_id: int, label_map: Dict[int, str]) -> str:

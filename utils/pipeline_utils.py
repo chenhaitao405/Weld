@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -97,6 +97,53 @@ def prepare_seg_input(enhanced_roi: np.ndarray) -> np.ndarray:
             seg_input = seg_input[:, :, :3]
 
     return np.ascontiguousarray(seg_input)
+
+
+def align_roi_orientation(roi_patch: np.ndarray) -> Tuple[np.ndarray, Optional[Dict[str, Any]]]:
+    """Rotate tall ROIs to landscape orientation for consistency."""
+    height, width = roi_patch.shape[:2]
+    if height > width:
+        rotated = cv2.rotate(roi_patch, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return rotated, {
+            "rotation": "ccw90",
+            "orig_width": width,
+            "orig_height": height
+        }
+    return roi_patch, None
+
+
+def restore_bbox_from_rotation(bbox: Sequence[float],
+                               rotation_meta: Optional[Dict[str, Any]]) -> List[float]:
+    if not rotation_meta or rotation_meta.get("rotation") != "ccw90":
+        return list(bbox)
+
+    orig_width = float(rotation_meta["orig_width"])
+    corners = [
+        (bbox[0], bbox[1]),
+        (bbox[2], bbox[1]),
+        (bbox[2], bbox[3]),
+        (bbox[0], bbox[3])
+    ]
+    restored_pts = [_rotate_point_from_ccw90(x, y, orig_width) for x, y in corners]
+    xs = [pt[0] for pt in restored_pts]
+    ys = [pt[1] for pt in restored_pts]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def restore_polygon_from_rotation(points: Sequence[Sequence[float]],
+                                  rotation_meta: Optional[Dict[str, Any]]) -> List[List[float]]:
+    if not rotation_meta or rotation_meta.get("rotation") != "ccw90":
+        return [[float(x), float(y)] for x, y in points]
+
+    orig_width = float(rotation_meta["orig_width"])
+    restored = [_rotate_point_from_ccw90(pt[0], pt[1], orig_width) for pt in points]
+    return [[float(x), float(y)] for x, y in restored]
+
+
+def _rotate_point_from_ccw90(x_rot: float, y_rot: float, orig_width: float) -> Tuple[float, float]:
+    orig_x = orig_width - 1.0 - y_rot
+    orig_y = x_rot
+    return float(orig_x), float(orig_y)
 
 
 class FontRenderer:
