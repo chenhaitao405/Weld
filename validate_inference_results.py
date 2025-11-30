@@ -87,6 +87,8 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(copy_images=True)
     parser.add_argument("--font-path", help="用于中文显示的字体路径，可选")
     parser.add_argument("--font-size", type=int, default=24, help="绘制文字的字号")
+    parser.add_argument("--match-mode", choices=["best", "multi"], default="multi",
+                        help="best=每个GT只匹配IoU最大的预测；multi=所有超过阈值的预测都视为命中")
 
     return parser.parse_args()
 
@@ -190,47 +192,110 @@ def _safe_float(value: Any) -> Optional[float]:
 
 def evaluate_image(predictions: List[PredictionRecord],
                    annotations: List[AnnotationRecord],
-                   iou_threshold: float) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+                   iou_threshold: float,
+                   match_mode: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     pred_data = [pred.to_dict() for pred in predictions]
     gt_data = [ann.to_dict() for ann in annotations]
+    allow_multi = (match_mode == "multi")
 
     for pred in pred_data:
         pred["matches"] = []
         pred["status"] = STATUS_FALSE
         pred["matched_gt"] = []
         pred["iou"] = 0.0
+        pred["best_iou"] = 0.0
+        pred["best_gt_index"] = None
+
+    for gt in gt_data:
+        gt["matches"] = []
+        gt["status"] = None
+        gt["best_iou"] = 0.0
+        gt["best_prediction"] = None
+        gt["iou"] = 0.0
 
     status_counter = Counter()
 
-    for gt_idx, gt in enumerate(gt_data):
-        best_pred_idx = None
-        best_iou = 0.0
+    if allow_multi:
         for pred_idx, pred in enumerate(pred_data):
-            iou = compute_iou(pred["bbox"], gt["bbox"])
-            if iou >= iou_threshold and iou > best_iou:
-                best_iou = iou
-                best_pred_idx = pred_idx
+            for gt_idx, gt in enumerate(gt_data):
+                iou = compute_iou(pred["bbox"], gt["bbox"])
+                if iou > pred["best_iou"]:
+                    pred["best_iou"] = iou
+                    pred["best_gt_index"] = gt_idx
+                if iou > gt["best_iou"]:
+                    gt["best_iou"] = iou
+                    gt["best_prediction"] = pred_idx
+                if iou >= iou_threshold:
+                    match_status = STATUS_SUCCESS_CLASS if classes_match(pred, gt) else STATUS_SUCCESS_DETECT
+                    pred_match = {
+                        "gt_index": gt_idx,
+                        "iou": iou,
+                        "status": match_status
+                    }
+                    pred["matches"].append(pred_match)
+                    pred["matched_gt"].append(gt_idx)
+                    pred["iou"] = max(pred["iou"], iou)
+                    gt["matches"].append({
+                        "pred_index": pred_idx,
+                        "iou": iou,
+                        "status": match_status
+                    })
+        for gt in gt_data:
+            if gt["matches"]:
+                if any(m["status"] == STATUS_SUCCESS_CLASS for m in gt["matches"]):
+                    gt["status"] = STATUS_SUCCESS_CLASS
+                else:
+                    gt["status"] = STATUS_SUCCESS_DETECT
+                gt["matched_prediction"] = [m["pred_index"] for m in gt["matches"]]
+                gt["iou"] = max(m["iou"] for m in gt["matches"])
+            else:
+                gt["status"] = STATUS_MISSED
+                gt["matched_prediction"] = None
+                gt["iou"] = gt.get("best_iou", 0.0)
+                status_counter[STATUS_MISSED] += 1
+    else:
+        for gt_idx, gt in enumerate(gt_data):
+            best_pred_idx = None
+            best_iou = 0.0
+            for pred_idx, pred in enumerate(pred_data):
+                iou = compute_iou(pred["bbox"], gt["bbox"])
+                if iou > pred["best_iou"]:
+                    pred["best_iou"] = iou
+                    pred["best_gt_index"] = gt_idx
+                if iou > gt["best_iou"]:
+                    gt["best_iou"] = iou
+                    gt["best_prediction"] = pred_idx
+                if iou > best_iou:
+                    best_iou = iou
+                    best_pred_idx = pred_idx
 
-        if best_pred_idx is None:
-            gt["status"] = STATUS_MISSED
-            gt["matched_prediction"] = None
-            gt["iou"] = 0.0
-            status_counter[STATUS_MISSED] += 1
-            continue
+            if best_pred_idx is None:
+                gt["status"] = STATUS_MISSED
+                gt["matched_prediction"] = None
+                gt["iou"] = gt.get("best_iou", 0.0)
+                status_counter[STATUS_MISSED] += 1
+                continue
 
-        pred = pred_data[best_pred_idx]
-        match_status = STATUS_SUCCESS_CLASS if classes_match(pred, gt) else STATUS_SUCCESS_DETECT
-        gt["status"] = match_status
-        gt["matched_prediction"] = best_pred_idx
-        gt["iou"] = best_iou
-        pred_match = {
-            "gt_index": gt_idx,
-            "iou": best_iou,
-            "status": match_status
-        }
-        pred["matches"].append(pred_match)
-        pred["matched_gt"].append(gt_idx)
-        pred["iou"] = max(pred["iou"], best_iou)
+            if best_iou < iou_threshold:
+                gt["status"] = STATUS_MISSED
+                gt["matched_prediction"] = None
+                gt["iou"] = best_iou
+                status_counter[STATUS_MISSED] += 1
+                continue
+
+            pred = pred_data[best_pred_idx]
+            match_status = STATUS_SUCCESS_CLASS if classes_match(pred, gt) else STATUS_SUCCESS_DETECT
+            gt["status"] = match_status
+            gt["matched_prediction"] = best_pred_idx
+            gt["iou"] = best_iou
+            pred_match = {
+                "gt_index": gt_idx,
+                "iou": best_iou,
+                "status": match_status
+            }
+            pred["matches"].append(pred_match)
+            pred["matched_gt"].append(gt_idx)
+            pred["iou"] = max(pred["iou"], best_iou)
 
     for pred in pred_data:
         if pred["matches"]:
@@ -244,7 +309,7 @@ def evaluate_image(predictions: List[PredictionRecord],
             pred["status"] = STATUS_FALSE
             pred["matched_gt"] = None
             status_counter[STATUS_FALSE] += 1
-            pred["iou"] = 0.0
+        pred["iou"] = pred.get("iou", pred.get("best_iou", 0.0))
 
     total_preds = len(pred_data)
     total_gt = len(gt_data)
@@ -379,7 +444,7 @@ def main():
             continue
 
         annotations = annotation_loader.load(image_path)
-        eval_data, metrics = evaluate_image(predictions, annotations, args.iou_threshold)
+        eval_data, metrics = evaluate_image(predictions, annotations, args.iou_threshold, args.match_mode)
 
         overlay = draw_overlay(image, eval_data, font_renderer)
         overlay_slug = rel_path.as_posix().replace('/', '_') or image_path.stem
