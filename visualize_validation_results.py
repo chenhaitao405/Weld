@@ -9,7 +9,9 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
+
+import cv2
 
 
 STATUS_SUCCESS_CLASS = "成功分类"
@@ -43,6 +45,10 @@ def parse_args() -> argparse.Namespace:
                         help="HTML标题")
     parser.add_argument("--max-images", type=int,
                         help="仅导出前N张图以减小HTML体积")
+    parser.add_argument("--thumbnail-width", type=int, default=320,
+                        help="概览模式缩略图的最大宽度像素，默认320")
+    parser.add_argument("--thumbnail-subdir", default="thumbnails",
+                        help="缩略图保存子目录（相对validation-dir），默认thumbnails")
     return parser.parse_args()
 
 
@@ -73,7 +79,9 @@ def read_detail(validation_dir: Path, relative_path: str) -> Dict[str, Any]:
 def build_entries(validation_dir: Path,
                   html_dir: Path,
                   manifest: Dict[str, Any],
-                  limit: int | None) -> List[Dict[str, Any]]:
+                  limit: int | None,
+                  thumbnail_dir: Path,
+                  thumbnail_width: int) -> List[Dict[str, Any]]:
     images = manifest.get("images", [])
     if limit is not None:
         images = images[:limit]
@@ -88,9 +96,15 @@ def build_entries(validation_dir: Path,
         overlay_rel = item.get("overlay_path")
         image_web_path = _to_relative_url(validation_dir, html_dir, image_rel)
         overlay_web_path = _to_relative_url(validation_dir, html_dir, overlay_rel)
+        source_image = _resolve_image_path(validation_dir, item, detail)
+        slug = detail.get("relative_image_path", detail_rel).replace('/', '_')
+        thumb_rel, thumb_scale = create_thumbnail(source_image, thumbnail_dir, slug, thumbnail_width)
+        thumbnail_web_path = _to_relative_url(validation_dir, html_dir, thumb_rel) if thumb_rel else image_web_path
         entries.append({
             "id": idx,
             "image_path": image_web_path,
+            "thumbnail_path": thumbnail_web_path,
+            "thumb_scale": thumb_scale,
             "overlay_path": overlay_web_path,
             "detail_path": detail_rel,
             "metrics": detail.get("metrics", {}),
@@ -99,6 +113,7 @@ def build_entries(validation_dir: Path,
             "annotations": detail.get("annotations", []),
             "width": detail.get("width"),
             "height": detail.get("height"),
+            "image_basename": Path(detail.get("relative_image_path", "")).name,
             "image_basename": Path(detail.get("relative_image_path", "")).name,
         })
     return entries
@@ -110,6 +125,54 @@ def _to_relative_url(validation_dir: Path, html_dir: Path, rel_path: str | None)
     abs_path = (validation_dir / rel_path).resolve()
     rel_to_html = os.path.relpath(abs_path, html_dir)
     return Path(rel_to_html).as_posix()
+
+
+def _resolve_image_path(validation_dir: Path,
+                        manifest_item: Dict[str, Any],
+                        detail: Dict[str, Any]) -> Optional[Path]:
+    candidates = []
+    copied_rel = manifest_item.get("copied_image_path")
+    if copied_rel:
+        candidates.append(validation_dir / copied_rel)
+    detail_image = detail.get("image_path")
+    if detail_image:
+        candidates.append(Path(detail_image))
+    manifest_image = manifest_item.get("image_path")
+    if manifest_image:
+        candidates.append(Path(manifest_image))
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return candidate
+    return None
+
+
+def create_thumbnail(image_path: Optional[Path],
+                     thumbnail_dir: Path,
+                     slug: str,
+                     target_width: int) -> Tuple[Optional[str], float]:
+    if image_path is None or not image_path.exists():
+        return None, 1.0
+    thumbnail_dir.mkdir(parents=True, exist_ok=True)
+    safe_slug = slug.replace('/', '_').replace('..', '_')
+    thumb_name = f"{safe_slug}_thumb.jpg"
+    thumb_path = thumbnail_dir / thumb_name
+
+    image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        return None, 1.0
+    height, width = image.shape[:2]
+    if width <= 0:
+        return None, 1.0
+    scale = min(1.0, target_width / float(width)) if target_width > 0 else 1.0
+    if scale < 1.0:
+        new_w = max(1, int(round(width * scale)))
+        new_h = max(1, int(round(height * scale)))
+        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    else:
+        resized = image
+    cv2.imwrite(str(thumb_path), resized)
+    rel_path = thumb_path.relative_to(thumbnail_dir.parent)
+    return rel_path.as_posix(), scale
 
 
 def build_html(title: str,
@@ -153,8 +216,8 @@ def build_html(title: str,
     <h1>{title}</h1>
     <div class=\"metrics\" id=\"global-metrics\"></div>
     <div class=\"controls\">
-      <label><input type=\"checkbox\" class=\"display-toggle\" data-toggle=\"pred\" checked />显示推理结果</label>
-      <label><input type=\"checkbox\" class=\"display-toggle\" data-toggle=\"gt\" checked />显示原始标注</label>
+      <label><input type=\"checkbox\" class=\"display-toggle\" data-toggle=\"pred\" checked />显示推理结果 <span class=\"toggle-line solid-line\"></span>实线</label>
+      <label><input type=\"checkbox\" class=\"display-toggle\" data-toggle=\"gt\" checked />显示原始标注 <span class=\"toggle-line dashed-line\"></span>虚线</label>
       <label><input type=\"checkbox\" class=\"display-toggle\" data-toggle=\"labels\" checked />显示交并比标签</label>
     </div>
     <div class=\"status-filter\">
@@ -175,8 +238,8 @@ def build_html(title: str,
         <div id=\"modal-title\"></div>
         <div class=\"modal-controls\">
           <div class=\"modal-toggles\">
-            <label><input type=\"checkbox\" class=\"display-toggle modal-display\" data-toggle=\"pred\" checked />显示推理结果</label>
-            <label><input type=\"checkbox\" class=\"display-toggle modal-display\" data-toggle=\"gt\" checked />显示原始标注</label>
+            <label><input type=\"checkbox\" class=\"display-toggle modal-display\" data-toggle=\"pred\" checked />显示推理结果 <span class=\"toggle-line solid-line\"></span>实线</label>
+            <label><input type=\"checkbox\" class=\"display-toggle modal-display\" data-toggle=\"gt\" checked />显示原始标注 <span class=\"toggle-line dashed-line\"></span>虚线</label>
             <label><input type=\"checkbox\" class=\"display-toggle modal-display\" data-toggle=\"labels\" checked />显示交并比标签</label>
           </div>
           <button id=\"modal-close\">关闭</button>
@@ -224,6 +287,20 @@ body {
 .controls label, .status-filter label {
   margin-right: 16px;
   font-size: 14px;
+}
+.toggle-line {
+  display: inline-block;
+  width: 26px;
+  height: 0;
+  border-top: 3px solid #2c3e50;
+  margin: 0 4px;
+  vertical-align: middle;
+}
+.toggle-line.solid-line {
+  border-top: 3px solid #2ecc71;
+}
+.toggle-line.dashed-line {
+  border-top: 3px dashed #3498db;
 }
 .sample-filter {
   margin-top: 6px;
@@ -283,6 +360,12 @@ body {
 .metrics-line {
   font-size: 13px;
   margin-top: 4px;
+}
+.loading-placeholder {
+  text-align: center;
+  padding: 32px 0;
+  color: #95a5a6;
+  font-size: 13px;
 }
 .badge {
   display: inline-block;
@@ -415,6 +498,8 @@ const modalState = {
   startY: 0,
 };
 const totalEntries = (VIS_DATA.entries || []).length;
+let cardObserver = null;
+const cardEntryMap = new Map();
 
 document.addEventListener('DOMContentLoaded', () => {
   initLegend();
@@ -499,11 +584,47 @@ function onDisplayToggleChange(e) {
 function renderGallery() {
   const gallery = document.getElementById('gallery');
   gallery.innerHTML = '';
+  cardEntryMap.clear();
+  setupObserver();
   const filtered = getFilteredEntries();
   filtered.forEach(entry => {
-    gallery.appendChild(renderCard(entry));
+    const card = createCardShell(entry);
+    gallery.appendChild(card);
+    cardEntryMap.set(card, entry);
+    if (cardObserver) {
+      cardObserver.observe(card);
+    } else {
+      hydrateCard(card, entry);
+    }
   });
   updateSampleCounter(filtered.length);
+}
+
+function setupObserver() {
+  if ('IntersectionObserver' in window) {
+    if (cardObserver) {
+      cardObserver.disconnect();
+    }
+    cardObserver = new IntersectionObserver(handleCardIntersect, {
+      rootMargin: '200px',
+      threshold: 0.1
+    });
+  } else {
+    cardObserver = null;
+  }
+}
+
+function handleCardIntersect(entries) {
+  entries.forEach(obs => {
+    if (obs.isIntersecting) {
+      const card = obs.target;
+      const entry = cardEntryMap.get(card);
+      hydrateCard(card, entry);
+      if (cardObserver) {
+        cardObserver.unobserve(card);
+      }
+    }
+  });
 }
 
 function getFilteredEntries() {
@@ -527,10 +648,9 @@ function shouldDisplayEntry(entry) {
   return false;
 }
 
-function renderCard(entry) {
+function createCardShell(entry) {
   const card = document.createElement('div');
   card.className = 'card';
-  card.addEventListener('click', () => openModal(entry));
 
   const header = document.createElement('div');
   header.className = 'card-header';
@@ -551,12 +671,31 @@ function renderCard(entry) {
 
   const body = document.createElement('div');
   body.className = 'card-body';
+  const placeholder = document.createElement('div');
+  placeholder.className = 'loading-placeholder';
+  placeholder.textContent = '加载图像...';
+  body.appendChild(placeholder);
+  card.appendChild(body);
+  return card;
+}
+
+function hydrateCard(card, entry) {
+  if (!entry || card.dataset.hydrated === '1') {
+    return;
+  }
+  card.dataset.hydrated = '1';
+  card.addEventListener('click', () => openModal(entry));
+  const body = card.querySelector('.card-body');
+  body.innerHTML = '';
 
   const imageStack = document.createElement('div');
   imageStack.className = 'image-stack';
   const img = document.createElement('img');
-  img.src = safePath(entry.image_path) || safePath(entry.overlay_path) || '';
+  const thumbSrc = safePath(entry.thumbnail_path || entry.image_path);
+  img.src = thumbSrc;
   img.alt = entry.image_basename;
+  img.dataset.fullSrc = safePath(entry.image_path);
+  img.dataset.thumbScale = entry.thumb_scale || 1;
   imageStack.appendChild(img);
 
   const predCanvas = document.createElement('canvas');
@@ -567,12 +706,9 @@ function renderCard(entry) {
 
   img.addEventListener('load', () => {
     prepareCanvases(img, [predCanvas, gtCanvas]);
-    renderEntryLayers(entry, img, predCanvas, gtCanvas);
+    const scale = determineThumbnailScale(entry, img);
+    renderEntryLayers(entry, predCanvas, gtCanvas, scale);
   });
-
-  card.appendChild(body);
-
-  return card;
 }
 
 function prepareCanvases(img, canvases) {
@@ -585,7 +721,18 @@ function prepareCanvases(img, canvases) {
   });
 }
 
-function renderEntryLayers(entry, img, predCanvas, gtCanvas) {
+function determineThumbnailScale(entry, img) {
+  const declared = parseFloat(entry.thumb_scale);
+  if (!Number.isNaN(declared) && declared > 0) {
+    return declared;
+  }
+  if (entry.width && img && img.naturalWidth) {
+    return img.naturalWidth / entry.width;
+  }
+  return 1;
+}
+
+function renderEntryLayers(entry, predCanvas, gtCanvas, scale = 1) {
   if (!predCanvas || !gtCanvas) return;
   const predCtx = predCanvas.getContext('2d');
   const gtCtx = gtCanvas.getContext('2d');
@@ -602,9 +749,10 @@ function renderEntryLayers(entry, img, predCanvas, gtCanvas) {
         return;
       }
       const color = STATUS_COLORS[status] || '#ffffff';
-      drawShape(predCtx, pred, color);
+      const scaledShape = scaleShape(pred, scale);
+      drawShape(predCtx, scaledShape, color);
       if (state.showLabels) {
-        drawLabel(predCtx, pred, color, status);
+        drawLabel(predCtx, scaledShape, color, status, scale);
       }
     });
   }
@@ -616,9 +764,10 @@ function renderEntryLayers(entry, img, predCanvas, gtCanvas) {
         return;
       }
       const color = ann.status === STATUS_MISSED ? STATUS_COLORS[STATUS_MISSED] : '#3498db';
-      drawBox(gtCtx, ann.bbox, color, true);
+      const scaledAnn = scaleShape(ann, scale);
+      drawBox(gtCtx, scaledAnn.bbox, color, true);
       if (state.showLabels) {
-        drawLabel(gtCtx, ann, color, ann.status ? `${ann.status}` : `标注:${ann.class_name || ''}`);
+        drawLabel(gtCtx, scaledAnn, color, ann.status ? `${ann.status}` : `标注:${ann.class_name || ''}`, scale);
       }
     });
   }
@@ -646,7 +795,7 @@ function initModal() {
     modalElements.image.addEventListener('load', () => {
       if (!modalEntry) return;
       prepareCanvases(modalElements.image, [modalElements.pred, modalElements.gt]);
-      renderEntryLayers(modalEntry, modalElements.image, modalElements.pred, modalElements.gt);
+      renderEntryLayers(modalEntry, modalElements.pred, modalElements.gt, 1);
     });
   }
   if (modalElements.wrapper) {
@@ -665,7 +814,7 @@ function openModal(entry) {
   }
   modalElements.container.classList.add('visible');
   resetModalTransform();
-  const src = safePath(entry.image_path) || safePath(entry.overlay_path) || '';
+  const src = safePath(entry.image_path) || safePath(entry.thumbnail_path) || '';
   if (modalElements.image) {
     modalElements.image.src = src;
   }
@@ -761,7 +910,7 @@ function drawPolygon(ctx, polygon, color) {
   ctx.globalAlpha = 1;
 }
 
-function drawLabel(ctx, data, color, statusText) {
+function drawLabel(ctx, data, color, statusText, scale = 1) {
   const bbox = data.bbox;
   if (!bbox) return;
   const text = [statusText, data.class_name || '', data.confidence != null ? data.confidence.toFixed(2) : null, data.iou != null ? `IoU:${data.iou.toFixed(2)}` : null]
@@ -770,12 +919,14 @@ function drawLabel(ctx, data, color, statusText) {
   if (!text) return;
   const x = bbox[0] + 4;
   const y = Math.max(16, bbox[1] + 16);
-  ctx.font = '20px sans-serif';
+  const fontSize = Math.max(10, Math.round(18 * Math.min(Math.max(scale, 0.3), 1)));
+  ctx.font = `${fontSize}px sans-serif`;
   ctx.fillStyle = 'rgba(0,0,0,0.6)';
   const textWidth = ctx.measureText(text).width;
-  ctx.fillRect(x - 2, y - 18, textWidth + 6, 20);
+  const boxHeight = fontSize + 4;
+  ctx.fillRect(x - 2, y - boxHeight, textWidth + 6, boxHeight);
   ctx.fillStyle = color;
-  ctx.fillText(text, x, y - 2);
+  ctx.fillText(text, x, y - 6);
 }
 
 function safePath(rel) {
@@ -790,6 +941,33 @@ function statusAllowed(status) {
   if (!status) return true;
   if (!STATUS_ORDER.includes(status)) return true;
   return state.statusVisible.has(status);
+}
+
+function scaleShape(shape, scale) {
+  const safeScale = Number.isFinite(scale) ? scale : 1;
+  return {
+    bbox: scaleBox(shape.bbox, safeScale),
+    polygon: scalePolygon(shape.polygon, safeScale),
+    class_name: shape.class_name,
+    confidence: shape.confidence,
+    iou: shape.iou
+  };
+}
+
+function scaleBox(bbox, scale) {
+  if (!bbox || !Array.isArray(bbox)) return null;
+  if (scale === 1) return bbox.slice();
+  return bbox.map(v => v * scale);
+}
+
+function scalePolygon(points, scale) {
+  if (!points || points.length === 0) {
+    return [];
+  }
+  if (scale === 1) {
+    return points.map(pt => [pt[0], pt[1]]);
+  }
+  return points.map(pt => [pt[0] * scale, pt[1] * scale]);
 }
 
 function syncDisplayToggles() {
@@ -811,7 +989,7 @@ function syncAnnotationCheckboxes() {
 function refreshModalCanvas() {
   if (!modalEntry || !modalElements.image) return;
   prepareCanvases(modalElements.image, [modalElements.pred, modalElements.gt]);
-  renderEntryLayers(modalEntry, modalElements.image, modalElements.pred, modalElements.gt);
+  renderEntryLayers(modalEntry, modalElements.pred, modalElements.gt, 1);
 }
 
 function updateSampleCounter(currentCount) {
@@ -841,7 +1019,15 @@ def main():
     manifest = load_manifest(validation_dir)
     summary = load_summary(validation_dir)
     html_dir = output_html.parent
-    entries = build_entries(validation_dir, html_dir, manifest, args.max_images)
+    thumbnail_dir = validation_dir / args.thumbnail_subdir
+    entries = build_entries(
+        validation_dir,
+        html_dir,
+        manifest,
+        args.max_images,
+        thumbnail_dir,
+        args.thumbnail_width
+    )
     if not entries:
         raise RuntimeError("manifest中没有图像条目，无法生成可视化")
 

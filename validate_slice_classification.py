@@ -41,7 +41,8 @@ DEFAULT_DATASETS = [
     "D3",
     "D4",
     "img20250608",
-    "img20250609"
+    "img20250609",
+    "val_sources"
 ]
 
 SUPPORTED_IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
