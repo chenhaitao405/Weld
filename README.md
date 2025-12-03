@@ -32,68 +32,87 @@
 
 ## 使用方法
 
-### 基本命令格式
+### 数据处理流水线（`run_data_pipeline.py`）
+
+**基本命令**
 
 ```bash
 python run_data_pipeline.py --steps [步骤编号] [--force]
 ```
 
-### 步骤说明
+**步骤说明**
 
 1. **Labelme转YOLO**（步骤1）
-   - 将Labelme格式的标注数据转换为YOLO训练格式
-   - 支持语义分割标签
-   - 可配置是否将所有标签统一为"crack"
-
+   - 将Labelme格式标签批量转换到统一的YOLO语义分割格式，并可选`unify_to_crack`
+   - 自动收集所有数据集的标签生成`label_id_map`，写入`dataset.yaml`
 2. **YOLO ROI提取**（步骤2）
-   - 使用预训练的焊缝检测模型提取感兴趣区域(ROI)
-   - 支持设置置信度阈值和IOU阈值
-   - 自动生成ROI区域的YOLO格式标签
-
-3. **YOLO竖图旋转**（步骤3）
-   - 检测ROI输出中的竖图（高度大于宽度）
-   - 自动将竖图逆时针旋转90°并同步更新YOLO分割标签
-   - 输出规整后的数据到`ROI_rotate`
-
+   - 通过`convert/pj/yolo_roi_extractor.py`和指定`weldROI2.pt`模型抽取ROI，并记录运行参数
+3. **竖图旋转**（步骤3）
+   - 将竖直图像统一旋转到水平方向，保持标签一致
 4. **图像裁剪与增强**（步骤4）
-   - 对`ROI_rotate`中的ROI进行滑窗裁剪
-   - 支持窗口大小和重叠率配置
-   - 提供窗宽窗位等图像增强功能
-
+   - 滑窗裁剪、增强ROI，可设置窗口、overlap、窗宽窗位以及`--no_slice`
 5. **训练任务转换**（步骤5）
-   - 支持从分割任务格式转换为检测或分类任务格式
-   - 灵活适配不同类型的模型训练需求
+   - 使用`seg2det.py`在分割、检测、分类任务间转换，并支持`--balance_data`
 
-### 示例用法
+**示例命令**
 
 ```bash
-# 运行所有5个步骤
+# 运行所有步骤
 python run_data_pipeline.py --steps 12345
 
-# 只运行前4个步骤
-python run_data_pipeline.py --steps 1234
-
-# 只运行步骤2、3、4、5
+# 仅执行步骤2~5
 python run_data_pipeline.py --steps 2345
 
-# 只运行步骤1、3、5（示例）
-python run_data_pipeline.py --steps 135
-
-# 强制运行步骤2（即使前置依赖不存在）
-python run_data_pipeline.py --steps 2 --force
+# 跳过缺失输入继续执行
+python run_data_pipeline.py --steps 23 --force
 ```
+
+执行期间会在`BASE_PATH/roi2_unify/pipeline_params.json`记录所选步骤、命令行与参数，便于追踪。
+
+### 推理→验证→可视化流水线（`run_full_pipeline.py`）
+
+该脚本按顺序调用：
+
+1. `run_inference_pipeline.py`
+2. `validate_inference_results.py`
+3. `visualize_validation_results.py`
+
+**核心参数**
+
+- `--base-path`：三阶段产物的根目录，默认`outputs/pipeline_run`
+- `--infer-subdir`、`--valid-subdir`：推理和验证子目录，默认`infer`/`valid`
+- `--inference-results`：推理结果文件名（默认`inference_results.json`）
+- `--run-inference-opts`：传给`run_inference_pipeline.py`的追加参数，**必须包含**`--image-dir`
+- `--validate-opts`、`--visualize-opts`：分别透传给验证与可视化脚本
+- `--steps`：选择执行 1=推理 2=验证 3=可视化
+- `--dry-run`：仅打印命令，便于检查配置
+
+脚本会根据提供的参数自动补齐缺失的`--output-dir`、`--results-json`、`--inference-json`等选项，并在`<base-path>/pipeline_args.json`中记录当前流水线配置。所有阶段完成后，可在`<base-path>/<valid-subdir>/report.html`查看汇总可视化结果。
+
+**示例命令**
+
+```bash
+python run_full_pipeline.py \
+  --base-path outputs/pipeline_run \
+  --run-inference-opts "--image-dir /data/images --weights runs/best.pt --device 0" \
+  --validate-opts "--score-threshold 0.3" \
+  --visualize-opts "--topk 50" \
+  --steps 123
+```
+
+仅准备命令不执行，可加`--dry-run`用于生成待运行命令清单。
 
 ## 输出说明
 
-处理结果默认保存在`labeltest`目录下（可通过`OUTPUT_BASE_DIR`修改），包含以下子目录：
+处理结果默认保存在`BASE_PATH/roi2_unify`（可通过`OUTPUT_BASE_DIR`修改），包含以下子目录：
 
-- `yolo`：步骤1的输出，YOLO格式的原始数据
-- `ROI`：步骤2的输出，提取的ROI区域数据
-- `ROI_rotate`：步骤3的输出，旋转对齐后的YOLO数据
-- `patch`：步骤4的输出，裁剪和增强后的图像
-- `cls`：步骤5的输出，转换后的分类/检测任务数据
+- `yolo`：步骤1输出，统一标签的YOLO分割数据
+- `ROI`：步骤2输出，基于检测模型提取的ROI
+- `ROI_rotate`：步骤3输出，方向统一后的ROI数据
+- `patch`：步骤4输出，裁剪/增强后的图像块
+- `det`（或`cls_dir`配置名）：步骤5输出，适配检测/分类训练的数据
 
-每个步骤的输出会作为后续步骤的输入，形成完整的数据处理链路。
+`run_full_pipeline.py`将按照`<base-path>/<infer-subdir>`与`<valid-subdir>`组织推理与验证产物，在`report.html`中汇总评估结果。
 
 ## 注意事项
 

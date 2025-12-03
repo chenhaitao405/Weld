@@ -27,7 +27,7 @@ from utils.pipeline_utils import FontRenderer, draw_detection_instance, ensure_c
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 DEFAULT_VAL_DIR = Path(
-    "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/roi2_merge/det/images/val"
+    "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/roi2_640_merge/coco_det/test"
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_WEIGHTS = SCRIPT_DIR / "runs" / "detrmedium" / "checkpoint_best_total.pth"

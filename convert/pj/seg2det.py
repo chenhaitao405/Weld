@@ -58,7 +58,7 @@ class YOLOFormatConverter:
             input_dir: 输入数据集目录
             output_dir: 输出数据集目录
             mode: 转换模式 ('det' 或 'cls')
-            balance_data: 是否在分类模式下执行数据平衡
+            balance_data: 是否执行数据平衡（检测模式下按有/无缺陷1:1、分类模式下按类别均衡）
         """
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
@@ -158,7 +158,7 @@ class YOLOFormatConverter:
         print("开始转换为检测格式...")
 
         if self.balance_data:
-            print("⚠️ 数据平衡仅支持分类模式，当前为检测模式，已忽略该选项。")
+            print("⚖️ 已启用数据平衡，转换完成后将对有缺陷/无缺陷样本进行1:1裁剪。")
 
         # 创建输出目录结构
         create_directory_structure(self.output_dir)
@@ -172,8 +172,14 @@ class YOLOFormatConverter:
         print("转换标签文件...")
         self._convert_labels_to_det()
 
+        if self.balance_data:
+            self._balance_detection_dataset()
+
         # 复制并更新dataset.yaml
         self._copy_and_update_yaml()
+
+        if self.balance_data:
+            self._recalculate_det_statistics()
 
         # 打印统计信息
         self._print_statistics()
@@ -266,6 +272,91 @@ class YOLOFormatConverter:
                     self.total_with_labels += 1
                 else:
                     self.total_without_labels += 1
+
+    def _balance_detection_dataset(self):
+        """在检测模式下对正负样本执行1:1平衡"""
+        labels_root = self.output_dir / 'labels'
+        images_root = self.output_dir / 'images'
+
+        if not labels_root.exists() or not images_root.exists():
+            print("⚠️ 数据平衡: 检测模式输出缺少images/labels目录，跳过。")
+            return
+
+        split_names = set()
+        split_names.update(d.name for d in labels_root.iterdir() if d.is_dir())
+        split_names.update(d.name for d in images_root.iterdir() if d.is_dir())
+
+        if not split_names:
+            print("⚠️ 数据平衡: 未找到可用的split目录，跳过。")
+            return
+
+        for split in sorted(split_names):
+            self._balance_detection_split(split)
+
+    def _balance_detection_split(self, split: str):
+        """使单个split中的有/无缺陷样本保持1:1"""
+        split_labels_dir = self.output_dir / 'labels' / split
+        split_images_dir = self.output_dir / 'images' / split
+
+        if not split_labels_dir.exists() or not split_images_dir.exists():
+            print(f"  ⚠️ 数据平衡: {split} 缺少labels或images目录，跳过。")
+            return
+
+        image_files = find_image_files(str(split_images_dir))
+        if not image_files:
+            print(f"  ⚠️ 数据平衡: {split} 无图像文件，跳过。")
+            return
+
+        positives = []
+        negatives = []
+
+        for image_path in image_files:
+            label_path = split_labels_dir / f"{image_path.stem}.txt"
+            labels = []
+            if label_path.exists():
+                labels = read_yolo_labels(str(label_path), mode='det')
+            if labels:
+                positives.append((image_path, label_path))
+            else:
+                negatives.append((image_path, label_path))
+
+        if not positives:
+            print(f"  ⚠️ 数据平衡: {split} 没有缺陷样本，无法平衡。")
+            return
+        if not negatives:
+            print(f"  ⚠️ 数据平衡: {split} 没有无缺陷样本，无法平衡。")
+            return
+
+        target = min(len(positives), len(negatives))
+        if len(positives) == len(negatives):
+            print(f"  ⚖️ 数据平衡: {split} 已为正负各 {target} 张。")
+            return
+
+        if len(positives) > len(negatives):
+            majority = positives
+            majority_label = "有缺陷"
+        else:
+            majority = negatives
+            majority_label = "无缺陷"
+        rng = random.Random(42)
+        rng.shuffle(majority)
+        removed = 0
+
+        for image_path, label_path in majority[target:]:
+            if label_path.exists():
+                try:
+                    label_path.unlink()
+                except OSError as exc:
+                    print(f"    ⚠️ 无法删除标签 {label_path}: {exc}")
+            if image_path.exists():
+                try:
+                    image_path.unlink()
+                except OSError as exc:
+                    print(f"    ⚠️ 无法删除图像 {image_path}: {exc}")
+                    continue
+            removed += 1
+
+        print(f"  ⚖️ 数据平衡: {split} 已调整为正负各 {target} 张，移除 {removed} 张{majority_label}样本。")
 
     def _process_split_to_cls(self, split: str):
         """处理单个split转换为分类格式"""
@@ -432,6 +523,38 @@ class YOLOFormatConverter:
                         self.class_distribution[split_name] = {}
                     self.class_distribution[split_name][class_dir.name] = num_files
 
+    def _recalculate_det_statistics(self):
+        """在检测模式下重新统计正负样本数量"""
+        self.total_converted = 0
+        self.total_with_labels = 0
+        self.total_without_labels = 0
+        self.class_distribution = {}
+
+        images_root = self.output_dir / 'images'
+        labels_root = self.output_dir / 'labels'
+
+        if not images_root.exists():
+            return
+
+        splits = [d.name for d in images_root.iterdir() if d.is_dir()]
+        for split in splits:
+            split_images_dir = images_root / split
+            split_labels_dir = labels_root / split
+            image_files = find_image_files(str(split_images_dir))
+
+            for image_path in image_files:
+                label_path = split_labels_dir / f"{image_path.stem}.txt"
+                labels = []
+                if label_path.exists():
+                    labels = read_yolo_labels(str(label_path), mode='det')
+
+                if labels:
+                    self.total_with_labels += 1
+                else:
+                    self.total_without_labels += 1
+
+                self.total_converted += 1
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -459,7 +582,7 @@ def main():
     parser.add_argument('--no_copy_images', action='store_true',
                         help='不复制图像到输出目录 (仅对det模式有效)')
     parser.add_argument('--balance_data', action='store_true',
-                        help='在分类模式下启用类别数量平衡')
+                        help='启用数据平衡（检测模式下正负样本1:1，分类模式下类别对齐）')
 
     args = parser.parse_args()
 

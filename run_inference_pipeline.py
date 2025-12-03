@@ -13,6 +13,7 @@ Features:
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,6 +25,8 @@ from ultralytics import YOLO
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
+
+DEBUG_STEP = True
 
 from convert.pj.yolo_roi_extractor import WeldROIDetector  # noqa: E402
 from utils import read_dataset_yaml  # noqa: E402
@@ -122,6 +125,16 @@ def parse_args() -> argparse.Namespace:
                         help="RF-DETR优化时使用float16")
     parser.add_argument("--det-class-names", nargs='+',
                         help="RF-DETR类别名称列表（按类别ID顺序）")
+    parser.add_argument("--det-secondary-weights",
+                        help="可选：RF-DETR Medium权重（切片增强分支）")
+    parser.add_argument("--det-secondary-confidence", type=float,
+                        help="切片分支单独的置信度阈值（默认与主干一致）")
+    parser.add_argument("--det-patch-size", type=int, nargs=2, default=[640, 640],
+                        help="切片检测窗口大小 [height width]")
+    parser.add_argument("--det-patch-overlap", type=float, default=0.2,
+                        help="切片检测窗口重叠率 (0-1)")
+    parser.add_argument("--det-fusion-iou", type=float, default=0.5,
+                        help="主干/切片分支NMS融合IoU阈值")
 
     # 切片分类模式参数
     parser.add_argument("--cls-weights", help="切片分类模型权重（mode=cls时必填）")
@@ -230,7 +243,8 @@ def run_detection_mode(args: argparse.Namespace,
                        image_paths: List[Path],
                        roi_detector: WeldROIDetector,
                        visualization_dir: Optional[Path],
-                       font_renderer: FontRenderer) -> List[Dict[str, Any]]:
+                       font_renderer: FontRenderer,
+                       debug_root: Optional[Path]) -> List[Dict[str, Any]]:
     if not args.det_weights:
         raise ValueError("det模式需要提供 --det-weights")
     if roi_detector is None:
@@ -244,23 +258,45 @@ def run_detection_mode(args: argparse.Namespace,
         optimize=args.det_optimize,
         optimize_batch=args.det_optimize_batch,
         use_half=args.det_use_half,
-        class_names=class_names
+        class_names=class_names,
+        model_variant="large"
     )
+    secondary_model = None
+    if args.det_secondary_weights:
+        secondary_conf = args.det_secondary_confidence if args.det_secondary_confidence is not None else args.det_confidence
+        secondary_model = RFDetrDetectionModel(
+            model_path=args.det_secondary_weights,
+            confidence=secondary_conf,
+            device=args.det_device,
+            optimize=args.det_optimize,
+            optimize_batch=args.det_optimize_batch,
+            use_half=args.det_use_half,
+            class_names=class_names,
+            model_variant="medium"
+        )
 
     results: List[Dict[str, Any]] = []
 
     for image_path in tqdm(image_paths, desc="推理中"):
         try:
             image = load_image(image_path)
+            image_debug_dir = None
+            if debug_root is not None:
+                image_debug_dir = debug_root / image_path.stem
             rois, vis_path = process_rfdet_detection(
                 image=image,
                 image_path=image_path,
                 roi_detector=roi_detector,
                 detection_model=detection_model,
+                secondary_model=secondary_model,
                 enhance_mode=args.enhance_mode,
+                patch_window=tuple(args.det_patch_size),
+                patch_overlap=args.det_patch_overlap,
+                fusion_iou=args.det_fusion_iou,
                 visualize=args.visualize,
                 visualization_dir=visualization_dir if args.visualize else None,
-                font_renderer=font_renderer
+                font_renderer=font_renderer,
+                debug_dir=image_debug_dir
             )
 
             h, w = image.shape[:2]
@@ -352,12 +388,16 @@ def main():
 
     font_renderer = FontRenderer(font_path=args.font_path, font_size=args.font_size)
 
+    debug_root = (output_dir / "temp") if DEBUG_STEP else None
+    if debug_root is not None:
+        debug_root.mkdir(parents=True, exist_ok=True)
+
     if args.mode == "seg":
         results = run_segmentation_mode(args, image_paths, roi_detector, visualization_dir, font_renderer)
     elif args.mode == "cls":
         results = run_classification_mode(args, image_paths, roi_detector, visualization_dir if args.visualize else None)
     else:
-        results = run_detection_mode(args, image_paths, roi_detector, visualization_dir, font_renderer)
+        results = run_detection_mode(args, image_paths, roi_detector, visualization_dir, font_renderer, debug_root)
 
     results_path = Path(args.results_json)
     if not results_path.is_absolute():
