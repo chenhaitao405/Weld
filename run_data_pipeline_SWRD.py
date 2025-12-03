@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Dict, List
 import copy
 
+import yaml
+
 # ========================= 路径配置 =========================
 SYSTEM = sys.platform
 if os.name == "nt":
@@ -22,6 +24,9 @@ DATA_ROOT = Path("/home/lenovo/code/CHT/datasets/Xray/opensource/SWRD8bit").reso
 IMAGES_ROOT = DATA_ROOT / "crop_weld_images"
 JSON_ROOT = DATA_ROOT / "crop_weld_jsons_merged"
 OUTPUT_BASE_DIR = DATA_ROOT / "swr_pipeline"
+REFERENCE_LABEL_MAP_PATH = Path(
+    "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/roi2_merge/yolo/dataset.yaml"
+).resolve()
 OUTPUT_CONFIG = {
     "yolo_dir": str(OUTPUT_BASE_DIR / "yolo"),
     "patch_dir": str(OUTPUT_BASE_DIR / "patch")
@@ -36,8 +41,8 @@ FIXED_PARAMS = {
     "patchandenhance": {
         "overlap": 0.5,
         "enhance_mode": "windowing",
-        "no_slice": False,
-        "window_size": [1280, 640],
+        "no_slice": True,
+        "window_size": [640, 640],
         "label_mode": "seg",
         "script_path": "convert/pj/patchandenhance.py"
     }
@@ -130,46 +135,37 @@ def discover_crop_weld_datasets(image_root: Path, json_root: Path) -> List[Dict[
 
     return datasets
 
-def collect_all_labels(datasets: List[Dict[str, str]], unify_to_crack: bool = False) -> OrderedDict:
+def load_label_map_from_yaml(yaml_path: Path) -> OrderedDict:
+    """读取 dataset.yaml 中的 label_id_map 生成有序标签映射"""
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"参考 dataset.yaml 不存在: {yaml_path}")
+
+    try:
+        with yaml_path.open("r", encoding="utf-8") as f:
+            yaml_data = yaml.safe_load(f)
+    except yaml.YAMLError as err:
+        raise RuntimeError(f"解析 {yaml_path} 失败: {err}") from err
+
+    label_map_raw = yaml_data.get("label_id_map") if yaml_data else None
+    if not isinstance(label_map_raw, dict):
+        raise ValueError(f"{yaml_path} 缺少有效的 label_id_map")
+
+    # 确保按照类别 ID 排序，避免 dict 无序导致类别错乱
+    ordered_pairs = sorted(label_map_raw.items(), key=lambda item: item[1])
+    return OrderedDict(ordered_pairs)
+
+def collect_all_labels(_datasets: List[Dict[str, str]], unify_to_crack: bool = False) -> OrderedDict:
     if unify_to_crack:
         print("\n📊 启用了 unify_to_crack，所有标签统一为 'crack'")
         label_map = OrderedDict([('crack', 0)])
         print(f"📋 标签映射：{dict(label_map)}")
         return label_map
 
-    print("\n📊 扫描所有数据集标签...")
-    all_labels = set()
-    dataset_labels: Dict[str, set] = {}
-
-    for dataset in datasets:
-        json_dir = dataset["json_dir"]
-        dataset_labels[dataset["name"]] = set()
-
-        for json_file in os.listdir(json_dir):
-            if not json_file.endswith('.json'):
-                continue
-            json_path = os.path.join(json_dir, json_file)
-            try:
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                for shape in data.get('shapes', []):
-                    label = shape.get('label', '').strip()
-                    if label:
-                        dataset_labels[dataset["name"]].add(label)
-                        all_labels.add(label)
-            except Exception as err:
-                print(f"  ⚠️ 读取 {json_file} 失败：{err}")
-
-        if dataset_labels[dataset["name"]]:
-            print(f"  ✓ {dataset['name']}: {len(dataset_labels[dataset['name']])} 个标签")
-
-    sorted_labels = sorted(all_labels)
-    label_map = OrderedDict([(label, idx) for idx, label in enumerate(sorted_labels)])
-
-    print(f"\n📋 合并标签映射（{len(label_map)} 类）：")
+    print("\n📊 读取参考数据集标签映射...")
+    label_map = load_label_map_from_yaml(REFERENCE_LABEL_MAP_PATH)
+    print(f"📋 引用 {REFERENCE_LABEL_MAP_PATH} 中的 label_id_map：")
     for label, idx in label_map.items():
-        owners = [d for d, labels in dataset_labels.items() if label in labels]
-        print(f"  {idx}: {label} -> {', '.join(owners)}")
+        print(f"  {idx}: {label}")
 
     return label_map
 
