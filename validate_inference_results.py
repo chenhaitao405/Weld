@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+import numpy as np
 from tqdm import tqdm
 
 from utils.annotation_loader import AnnotationLoader, AnnotationRecord
@@ -31,6 +36,12 @@ STATUS_COLORS = {
     STATUS_MISSED: (0, 0, 255),              # 红色
     STATUS_FALSE: (142, 68, 173)             # 紫色
 }
+
+DEFAULT_CLASS_NAME = "未标注"
+DEFAULT_FONT_FAMILIES = ["SimHei", "Noto Sans CJK SC", "Noto Sans CJK JP", "Microsoft YaHei", "PingFang SC", "DejaVu Sans"]
+
+plt.rcParams["font.sans-serif"] = DEFAULT_FONT_FAMILIES
+plt.rcParams["axes.unicode_minus"] = False
 
 
 @dataclass
@@ -336,6 +347,153 @@ def evaluate_image(predictions: List[PredictionRecord],
     }, metrics
 
 
+def configure_matplotlib_font(font_path: Optional[str]):
+    if font_path:
+        try:
+            font_manager.fontManager.addfont(font_path)
+            font_prop = font_manager.FontProperties(fname=font_path)
+            font_name = font_prop.get_name()
+            plt.rcParams["font.sans-serif"] = [font_name]
+            return
+        except Exception as exc:
+            print(f"⚠️ 无法加载指定字体 {font_path}: {exc}，改用默认字体")
+    plt.rcParams["font.sans-serif"] = DEFAULT_FONT_FAMILIES
+
+
+def _display_class_name(value: Any) -> str:
+    if value is None:
+        return DEFAULT_CLASS_NAME
+    name = str(value).strip()
+    return name or DEFAULT_CLASS_NAME
+
+
+def _init_class_stat() -> Dict[str, int]:
+    return {
+        "pred_total": 0,
+        "pred_detected": 0,
+        "pred_success_class": 0,
+        "gt_total": 0,
+        "gt_detected": 0
+    }
+
+
+def update_class_statistics(class_stats: Dict[str, Dict[str, int]],
+                            eval_data: Dict[str, Any]):
+    for pred in eval_data["predictions"]:
+        class_name = _display_class_name(pred.get("class_name"))
+        if class_name not in class_stats:
+            class_stats[class_name] = _init_class_stat()
+        stats = class_stats[class_name]
+        stats["pred_total"] += 1
+        status = pred.get("status")
+        if status in {STATUS_SUCCESS_CLASS, STATUS_SUCCESS_DETECT}:
+            stats["pred_detected"] += 1
+            if status == STATUS_SUCCESS_CLASS:
+                stats["pred_success_class"] += 1
+
+    for gt in eval_data["annotations"]:
+        class_name = _display_class_name(gt.get("class_name"))
+        if class_name not in class_stats:
+            class_stats[class_name] = _init_class_stat()
+        stats = class_stats[class_name]
+        stats["gt_total"] += 1
+        if gt.get("status") in {STATUS_SUCCESS_CLASS, STATUS_SUCCESS_DETECT}:
+            stats["gt_detected"] += 1
+
+
+def build_per_class_metrics(class_stats: Dict[str, Dict[str, int]]) -> List[Dict[str, Any]]:
+    metrics: List[Dict[str, Any]] = []
+    for class_name in sorted(class_stats.keys()):
+        stats = class_stats[class_name]
+        pred_total = stats["pred_total"]
+        pred_detected = stats["pred_detected"]
+        pred_success = stats["pred_success_class"]
+        gt_total = stats["gt_total"]
+        gt_detected = stats["gt_detected"]
+
+        precision = (pred_detected / pred_total) if pred_total > 0 else None
+        recall = (gt_detected / gt_total) if gt_total > 0 else None
+        classification_acc = (pred_success / pred_detected) if pred_detected > 0 else None
+
+        metrics.append({
+            "class_name": class_name,
+            "defect_precision": precision,
+            "defect_precision_counts": [pred_detected, pred_total],
+            "defect_recall": recall,
+            "defect_recall_counts": [gt_detected, gt_total],
+            "classification_accuracy": classification_acc,
+            "classification_counts": [pred_success, pred_detected]
+        })
+    return metrics
+
+
+def plot_per_class_metrics(per_class_metrics: List[Dict[str, Any]],
+                           output_dir: Path,
+                           overall_metrics: Dict[str, Optional[float]]) -> Optional[Path]:
+    if not per_class_metrics:
+        return None
+
+    classes = [m["class_name"] for m in per_class_metrics]
+    x_positions = np.arange(len(classes))
+    bar_width = 0.28
+    spacing_factor = 1.0  # 控制组内柱子间距
+
+    specs = [
+        ("defect_precision", "缺陷识别准确率", "defect_precision_counts", "#5470C6"),
+        ("defect_recall", "缺陷识别召回率", "defect_recall_counts", "#91CC75"),
+        ("classification_accuracy", "缺陷分类准确率", "classification_counts", "#EE6666")
+    ]
+
+    fig_width = max(12, len(classes) * 1.5)
+    fig, ax = plt.subplots(figsize=(fig_width, 6.5))
+    bars_collection = []
+
+    for idx, (metric_key, title, count_key, color) in enumerate(specs):
+        offset = (idx - 1) * bar_width * spacing_factor
+        positions = x_positions + offset
+        values = []
+        labels = []
+        for item in per_class_metrics:
+            val = item[metric_key]
+            counts = item[count_key]
+            numerator, denominator = counts
+            value_percent = (val * 100) if val is not None else 0.0
+            values.append(value_percent)
+            labels.append(f"{numerator}/{denominator}\n{value_percent:.1f}%")
+
+        avg_val = overall_metrics.get(metric_key)
+        avg_text = f"{avg_val * 100:.2f}%" if avg_val is not None else "--"
+        legend_label = f"{title}: {avg_text}"
+        bars = ax.bar(positions, values, width=bar_width, color=color, label=legend_label)
+        bars_collection.append((bars, labels))
+
+    ax.set_ylabel("百分比(%)")
+    ax.set_ylim(0, 115)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(classes, rotation=28, ha="right")
+    ax.legend()
+    ax.set_title("各类别缺陷识别/召回/分类准确率")
+
+    for bars, labels in bars_collection:
+        for bar, label in zip(bars, labels):
+            height = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                height + 4,
+                label,
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=1.0)
+            )
+
+    fig.tight_layout()
+    output_path = output_dir / "per_class_metrics.png"
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 def draw_overlay(image: np.ndarray,
                  eval_data: Dict[str, Any],
                  font_renderer: FontRenderer) -> np.ndarray:
@@ -386,6 +544,7 @@ def relative_image_path(image_path: Path, image_root: Path) -> Path:
 
 def main():
     args = parse_args()
+    configure_matplotlib_font(args.font_path)
     inference_path = Path(args.inference_json)
     output_dir = Path(args.output_dir)
     data_dir = output_dir / "data"
@@ -423,6 +582,7 @@ def main():
     global_counts = Counter()
     global_success_class = 0
     global_success_detect = 0
+    class_stats: Dict[str, Dict[str, int]] = {}
 
     for image_result in tqdm(results, desc="验证中"):
         image_path = Path(image_result.get("image_path", ""))
@@ -489,6 +649,9 @@ def main():
         global_counts.update(counts)
         global_success_class += counts[STATUS_SUCCESS_CLASS]
         global_success_detect += counts[STATUS_SUCCESS_DETECT]
+        update_class_statistics(class_stats, eval_data)
+
+    per_class_metrics = build_per_class_metrics(class_stats)
 
     total_pred = global_counts.get("predictions", 0)
     total_gt = global_counts.get("ground_truth", 0)
@@ -515,8 +678,12 @@ def main():
                 STATUS_FALSE: global_counts.get(STATUS_FALSE, 0),
                 STATUS_MISSED: global_counts.get(STATUS_MISSED, 0)
             }
-        }
+        },
+        "per_class": per_class_metrics
     }
+    plot_path = plot_per_class_metrics(per_class_metrics, output_dir, summary["overall"])
+    if plot_path:
+        summary["per_class_plot"] = Path(plot_path).relative_to(output_dir).as_posix()
 
     manifest_path = data_dir / "manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
@@ -533,6 +700,8 @@ def main():
         print(f"缺陷识别召回率: {summary['overall']['defect_recall']:.4f}")
     if summary["overall"]["classification_accuracy"] is not None:
         print(f"缺陷分类准确率: {summary['overall']['classification_accuracy']:.4f}")
+    if plot_path:
+        print(f"每类指标图: {plot_path}")
     print(f"Manifest: {manifest_path}")
     print(f"Summary: {summary_path}")
 
