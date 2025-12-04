@@ -12,3 +12,5 @@
 *.pth
 /outputs
 /outputs
+/mlruns
+/train/outputs

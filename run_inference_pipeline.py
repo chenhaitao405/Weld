@@ -129,6 +129,8 @@ def parse_args() -> argparse.Namespace:
                         help="可选：RF-DETR Medium权重（切片增强分支）")
     parser.add_argument("--det-secondary-confidence", type=float,
                         help="切片分支单独的置信度阈值（默认与主干一致）")
+    parser.add_argument("--det-secondary-variant", choices=["medium", "large"], default="medium",
+                        help="切片分支使用的RF-DETR模型规模，默认medium")
     parser.add_argument("--det-patch-size", type=int, nargs=2, default=[640, 640],
                         help="切片检测窗口大小 [height width]")
     parser.add_argument("--det-patch-overlap", type=float, default=0.2,
@@ -264,6 +266,7 @@ def run_detection_mode(args: argparse.Namespace,
     secondary_model = None
     if args.det_secondary_weights:
         secondary_conf = args.det_secondary_confidence if args.det_secondary_confidence is not None else args.det_confidence
+        secondary_variant = args.det_secondary_variant or "medium"
         secondary_model = RFDetrDetectionModel(
             model_path=args.det_secondary_weights,
             confidence=secondary_conf,
@@ -272,7 +275,7 @@ def run_detection_mode(args: argparse.Namespace,
             optimize_batch=args.det_optimize_batch,
             use_half=args.det_use_half,
             class_names=class_names,
-            model_variant="medium"
+            model_variant=secondary_variant
         )
 
     results: List[Dict[str, Any]] = []

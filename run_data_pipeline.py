@@ -44,7 +44,7 @@ OUTPUT_CONFIG = {
     "yolo_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"yolo"),
     "roi_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"ROI"),
     "roi_rotate": os.path.join(BASE_PATH, OUTPUT_BASE_DIR, "ROI_rotate"),
-    "patch_dir": os.path.join(BASE_PATH,OUTPUT_BASE_DIR, "patch"),
+    "patch_dir": os.path.join(BASE_PATH,OUTPUT_BASE_DIR, "patch_"),
     "cls_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR, "det")
 }
 FIXED_PARAMS = {
