@@ -1,0 +1,99 @@
+default_profile: linux_self_1120
+
+profiles:
+  linux_self_1120:
+    platform: Linux
+    description: Default自采数据集1120
+    paths:
+      base_path: /home/lenovo/code/CHT/datasets/Xray/self/1120/labeled
+      json_base_path: /home/lenovo/code/CHT/datasets/Xray/self/1120/adjust
+      output_base_dir: roi2_unify
+    datasets:
+      - D1
+      - D2
+      - D3
+      - D4
+      - img20250608
+      - img20250609
+    outputs:
+      yolo_dir: yolo
+      roi_dir: ROI
+      roi_rotate: ROI_rotate
+      patch_dir: patch_
+      cls_dir: det
+    params:
+      labelme2yolo:
+        seg: true
+        unify_to_crack: true
+        script_path: convert/labelme2yolo.py
+      yolo_roi_extractor:
+        model_path: ./model/weldROI2.pt
+        roi_conf: 0.25
+        roi_iou: 0.45
+        padding: 0.1
+        mode: seg
+        script_path: convert/pj/yolo_roi_extractor.py
+      rotate_yolo:
+        script_path: convert/pj/rotateYOLOdate.py
+      patchandenhance:
+        overlap: 0.7
+        enhance_mode: windowing
+        no_slice: true
+        window_size: [640, 640]
+        label_mode: seg
+        script_path: convert/pj/patchandenhance.py
+      seg2det:
+        mode: det
+        script_path: convert/pj/seg2det.py
+        balance_data: true
+
+
+  linux_1205_folder:
+    platform: Linux
+    description: 12月5日客户新标注数据
+    paths:
+      base_path: /home/lenovo/code/CHT/datasets/Xray/self/1208
+      json_base_path: /home/lenovo/code/CHT/datasets/Xray/self/1208/adjust_label
+      output_base_dir: roi2_merge
+    datasets:
+      - 6-1_8bit
+      - 6-2_8bit
+      - 7-1_8bit
+      - 7-2_8bit
+      - 8_8bit
+      - 9-1_8bit
+      - 9-2_8bit
+      - DP_8bit
+
+      
+    outputs:
+      yolo_dir: yolo
+      roi_dir: ROI
+      roi_rotate: ROI_rotate
+      patch_dir: patch_
+      cls_dir: det
+    params:
+      labelme2yolo:
+        seg: true
+        unify_to_crack: true
+        script_path: convert/labelme2yolo.py
+      yolo_roi_extractor:
+        model_path: ./model/weldROI2.pt
+        roi_conf: 0.25
+        roi_iou: 0.45
+        padding: 0.1
+        mode: seg
+        script_path: convert/pj/yolo_roi_extractor.py
+      rotate_yolo:
+        script_path: convert/pj/rotateYOLOdate.py
+      patchandenhance:
+        overlap: 0.7
+        enhance_mode: windowing
+        no_slice: true
+        window_size: [640, 640]
+        label_mode: seg
+        script_path: convert/pj/patchandenhance.py
+      seg2det:
+        mode: det
+        script_path: convert/pj/seg2det.py
+        balance_data: true
