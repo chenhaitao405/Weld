@@ -23,6 +23,7 @@ import argparse
 import shutil
 import random
 from pathlib import Path
+from typing import Optional
 from tqdm import tqdm
 
 # 添加项目根目录到路径
@@ -50,24 +51,29 @@ class YOLOFormatConverter:
     """YOLO格式转换器"""
 
     def __init__(self, input_dir: str, output_dir: str, mode: str = 'det',
-                 balance_data: bool = False):
+                 balance_data: bool = False, balance_ratio: float = 1.0):
         """
         初始化转换器
 
         Args:
             input_dir: 输入数据集目录
             output_dir: 输出数据集目录
-            mode: 转换模式 ('det' 或 'cls')
-            balance_data: 是否执行数据平衡（检测模式下按有/无缺陷1:1、分类模式下按类别均衡）
+            mode: 转换模式 ('det'、'cls' 或 'balance')
+            balance_data: 是否执行数据平衡（检测模式按有/无缺陷比例、分类模式按类别均衡）
+            balance_ratio: 检测平衡时负样本相对于正样本的目标比例 (>0)
         """
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.mode = mode
         self.balance_data = balance_data
+        self.balance_ratio = float(balance_ratio)
 
         # 验证输入目录
         if not self.input_dir.exists():
             raise ValueError(f"输入目录不存在: {input_dir}")
+
+        if self.balance_ratio <= 0:
+            raise ValueError("平衡比例必须大于0，例如0.5表示负样本=正样本*0.5")
 
         # 统计信息
         self.total_converted = 0
@@ -79,6 +85,8 @@ class YOLOFormatConverter:
         print(f"  - 输入目录: {input_dir}")
         print(f"  - 输出目录: {output_dir}")
         print(f"  - 转换模式: {mode}")
+        if mode in {'det', 'balance'}:
+            print(f"  - 目标负/正比例: {self.balance_ratio}")
 
     def seg_to_det_line(self, seg_line: list) -> list:
         """
@@ -158,7 +166,7 @@ class YOLOFormatConverter:
         print("开始转换为检测格式...")
 
         if self.balance_data:
-            print("⚖️ 已启用数据平衡，转换完成后将对有缺陷/无缺陷样本进行1:1裁剪。")
+            print(f"⚖️ 已启用数据平衡，目标负样本/正样本比例为 {self.balance_ratio}。")
 
         # 创建输出目录结构
         create_directory_structure(self.output_dir)
@@ -182,6 +190,27 @@ class YOLOFormatConverter:
             self._recalculate_det_statistics()
 
         # 打印统计信息
+        self._print_statistics()
+
+    def balance_detection_only(self, dataset_root: Optional[Path] = None):
+        """仅对已有检测数据集执行平衡"""
+        target_root = Path(dataset_root) if dataset_root else self.output_dir
+        if not (target_root / 'images').exists() or not (target_root / 'labels').exists():
+            # 尝试使用输入目录
+            alt_root = self.input_dir
+            if (alt_root / 'images').exists() and (alt_root / 'labels').exists():
+                target_root = alt_root
+            else:
+                raise ValueError("balance模式需要已存在的检测数据集(images/labels目录)")
+
+        print("开始平衡现有检测数据集...")
+        print(f"  - 数据集目录: {target_root}")
+        print(f"  - 目标负/正比例: {self.balance_ratio}")
+
+        self._balance_detection_dataset(target_root)
+        self._recalculate_det_statistics(target_root)
+        # 确保统计输出路径正确
+        self.output_dir = target_root
         self._print_statistics()
 
     def convert_to_cls(self):
@@ -273,10 +302,11 @@ class YOLOFormatConverter:
                 else:
                     self.total_without_labels += 1
 
-    def _balance_detection_dataset(self):
-        """在检测模式下对正负样本执行1:1平衡"""
-        labels_root = self.output_dir / 'labels'
-        images_root = self.output_dir / 'images'
+    def _balance_detection_dataset(self, dataset_root: Optional[Path] = None):
+        """在检测模式下对正负样本执行平衡"""
+        root = dataset_root or self.output_dir
+        labels_root = root / 'labels'
+        images_root = root / 'images'
 
         if not labels_root.exists() or not images_root.exists():
             print("⚠️ 数据平衡: 检测模式输出缺少images/labels目录，跳过。")
@@ -291,12 +321,12 @@ class YOLOFormatConverter:
             return
 
         for split in sorted(split_names):
-            self._balance_detection_split(split)
+            self._balance_detection_split(split, root)
 
-    def _balance_detection_split(self, split: str):
-        """使单个split中的有/无缺陷样本保持1:1"""
-        split_labels_dir = self.output_dir / 'labels' / split
-        split_images_dir = self.output_dir / 'images' / split
+    def _balance_detection_split(self, split: str, dataset_root: Path):
+        """按照设定比例平衡单个split中的有/无缺陷样本"""
+        split_labels_dir = dataset_root / 'labels' / split
+        split_images_dir = dataset_root / 'images' / split
 
         if not split_labels_dir.exists() or not split_images_dir.exists():
             print(f"  ⚠️ 数据平衡: {split} 缺少labels或images目录，跳过。")
@@ -327,36 +357,63 @@ class YOLOFormatConverter:
             print(f"  ⚠️ 数据平衡: {split} 没有无缺陷样本，无法平衡。")
             return
 
-        target = min(len(positives), len(negatives))
-        if len(positives) == len(negatives):
-            print(f"  ⚖️ 数据平衡: {split} 已为正负各 {target} 张。")
+        pos_count = len(positives)
+        neg_count = len(negatives)
+
+        if pos_count == 0 or neg_count == 0:
+            print(f"  ⚠️ 数据平衡: {split} 正负样本不足，跳过。")
             return
 
-        if len(positives) > len(negatives):
-            majority = positives
-            majority_label = "有缺陷"
-        else:
-            majority = negatives
-            majority_label = "无缺陷"
+        desired_neg = int(round(pos_count * self.balance_ratio))
+        desired_neg = max(0, desired_neg)
+
         rng = random.Random(42)
-        rng.shuffle(majority)
-        removed = 0
+        removed_pos = removed_neg = 0
 
-        for image_path, label_path in majority[target:]:
-            if label_path.exists():
-                try:
-                    label_path.unlink()
-                except OSError as exc:
-                    print(f"    ⚠️ 无法删除标签 {label_path}: {exc}")
-            if image_path.exists():
-                try:
-                    image_path.unlink()
-                except OSError as exc:
-                    print(f"    ⚠️ 无法删除图像 {image_path}: {exc}")
-                    continue
-            removed += 1
+        if neg_count > desired_neg:
+            # 负样本过多，随机移除
+            rng.shuffle(negatives)
+            to_remove = neg_count - desired_neg
+            for image_path, label_path in negatives[desired_neg:]:
+                if label_path.exists():
+                    try:
+                        label_path.unlink()
+                    except OSError as exc:
+                        print(f"    ⚠️ 无法删除标签 {label_path}: {exc}")
+                if image_path.exists():
+                    try:
+                        image_path.unlink()
+                    except OSError as exc:
+                        print(f"    ⚠️ 无法删除图像 {image_path}: {exc}")
+                        continue
+                removed_neg += 1
+            neg_count -= removed_neg
+        elif neg_count < desired_neg and self.balance_ratio > 0:
+            # 负样本不足，需要裁剪正样本以满足比例
+            target_pos = int(round(neg_count / self.balance_ratio)) if self.balance_ratio > 0 else pos_count
+            target_pos = max(1, target_pos)
+            target_pos = min(target_pos, pos_count)
+            if target_pos < pos_count:
+                rng.shuffle(positives)
+                for image_path, label_path in positives[target_pos:]:
+                    if label_path.exists():
+                        try:
+                            label_path.unlink()
+                        except OSError as exc:
+                            print(f"    ⚠️ 无法删除标签 {label_path}: {exc}")
+                    if image_path.exists():
+                        try:
+                            image_path.unlink()
+                        except OSError as exc:
+                            print(f"    ⚠️ 无法删除图像 {image_path}: {exc}")
+                            continue
+                    removed_pos += 1
+                pos_count -= removed_pos
 
-        print(f"  ⚖️ 数据平衡: {split} 已调整为正负各 {target} 张，移除 {removed} 张{majority_label}样本。")
+        new_ratio = (neg_count / pos_count) if pos_count else 0
+        print(
+            f"  ⚖️ 数据平衡: {split} 调整后正样本 {pos_count} 张、负样本 {neg_count} 张，"\
+            f"移除正样本 {removed_pos} 张、负样本 {removed_neg} 张 (目标比例 {self.balance_ratio}, 实际 {new_ratio:.3f})")
 
     def _process_split_to_cls(self, split: str):
         """处理单个split转换为分类格式"""
@@ -523,15 +580,16 @@ class YOLOFormatConverter:
                         self.class_distribution[split_name] = {}
                     self.class_distribution[split_name][class_dir.name] = num_files
 
-    def _recalculate_det_statistics(self):
+    def _recalculate_det_statistics(self, dataset_root: Optional[Path] = None):
         """在检测模式下重新统计正负样本数量"""
         self.total_converted = 0
         self.total_with_labels = 0
         self.total_without_labels = 0
         self.class_distribution = {}
 
-        images_root = self.output_dir / 'images'
-        labels_root = self.output_dir / 'labels'
+        root = dataset_root or self.output_dir
+        images_root = root / 'images'
+        labels_root = root / 'labels'
 
         if not images_root.exists():
             return
@@ -577,12 +635,14 @@ def main():
                         help='输入数据集目录')
     parser.add_argument('--output_dir', type=str, required=True,
                         help='输出数据集目录')
-    parser.add_argument('--mode', type=str, choices=['det', 'cls'], default='det',
-                        help='转换模式: "det"(检测) 或 "cls"(分类) (默认: det)')
+    parser.add_argument('--mode', type=str, choices=['det', 'cls', 'balance'], default='det',
+                        help='转换模式: det=转检测, cls=转分类, balance=仅数据平衡')
     parser.add_argument('--no_copy_images', action='store_true',
                         help='不复制图像到输出目录 (仅对det模式有效)')
     parser.add_argument('--balance_data', action='store_true',
-                        help='启用数据平衡（检测模式下正负样本1:1，分类模式下类别对齐）')
+                        help='启用数据平衡（检测模式按指定比例，分类模式下类别对齐）')
+    parser.add_argument('--balance_ratio', type=float, default=1.0,
+                        help='检测数据平衡时的负/正目标比例，例如0.5表示负样本数量为正样本的0.5倍')
 
     args = parser.parse_args()
 
@@ -591,14 +651,17 @@ def main():
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         mode=args.mode,
-        balance_data=args.balance_data
+        balance_data=args.balance_data,
+        balance_ratio=args.balance_ratio
     )
 
     # 根据模式执行转换
     if args.mode == 'cls':
         converter.convert_to_cls()
-    else:  # det mode
+    elif args.mode == 'det':
         converter.convert_to_det(copy_images=not args.no_copy_images)
+    else:
+        converter.balance_detection_only()
 
 
 

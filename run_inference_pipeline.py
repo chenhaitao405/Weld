@@ -16,11 +16,10 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 from tqdm import tqdm
-from ultralytics import YOLO
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -31,18 +30,8 @@ DEBUG_STEP = True
 from convert.pj.yolo_roi_extractor import WeldROIDetector  # noqa: E402
 from utils import read_dataset_yaml  # noqa: E402
 from utils.pipeline_utils import FontRenderer, load_image  # noqa: E402
-from utils.segmentation_pipeline import process_roi_and_segmentation  # noqa: E402
-from utils.detection_pipeline import (  # noqa: E402
-    RFDetrDetectionModel,
-    process_roi_and_detection as process_rfdet_detection
-)
-from utils.slice_classification_pipeline import (  # noqa: E402
-    SliceClassificationPipeline, DEFAULT_ALPHA as CLS_DEFAULT_ALPHA,
-    DEFAULT_CONFIDENCE_THRESHOLD as CLS_DEFAULT_CONF,
-    DEFAULT_DEFECT_CLASSES as CLS_DEFAULT_CLASSES,
-    DEFAULT_OVERLAP_RATIO as CLS_DEFAULT_OVERLAP,
-    DEFAULT_WINDOW_SIZE as CLS_DEFAULT_WINDOW
-)
+from utils import detection_pipeline as rfdet_pipeline  # noqa: E402
+from utils import yolo_pipeline  # noqa: E402
 
 
 SUPPORTED_IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
@@ -67,15 +56,34 @@ def _load_names_from_yaml(data_config: Optional[str]) -> List[str]:
     return names
 
 
-def _load_class_names(data_config: Optional[str], seg_model: YOLO) -> List[str]:
-    """优先从dataset.yaml读取类别名称，否则回退到模型自带names"""
-    names: List[str] = _load_names_from_yaml(data_config)
-    if not names and hasattr(seg_model, 'names'):
-        model_names = seg_model.names
-        if isinstance(model_names, dict):
-            names = [model_names[i] for i in sorted(model_names.keys())]
-        elif isinstance(model_names, (list, tuple)):
-            names = list(model_names)
+def _load_class_names(explicit_names: Optional[Sequence[str]],
+                      data_config: Optional[str],
+                      model_with_names: Optional[Any] = None) -> List[str]:
+    """按照优先级解析类别名称：命令行 > dataset.yaml > 模型自带"""
+    names: List[str] = []
+
+    if explicit_names:
+        names = [str(name) for name in explicit_names]
+        return names
+
+    names = _load_names_from_yaml(data_config)
+    if names:
+        return names
+
+    candidate = None
+    if model_with_names is not None:
+        if hasattr(model_with_names, 'names'):
+            candidate = getattr(model_with_names, 'names')
+        elif hasattr(model_with_names, 'class_names'):
+            candidate = getattr(model_with_names, 'class_names')
+        elif hasattr(model_with_names, 'model') and hasattr(model_with_names.model, 'class_names'):
+            candidate = getattr(model_with_names.model, 'class_names')
+
+    if isinstance(candidate, dict):
+        sorted_items = sorted(candidate.items(), key=lambda kv: int(kv[0]))
+        names = [str(item[1]) for item in sorted_items]
+    elif isinstance(candidate, (list, tuple)):
+        names = [str(item) for item in candidate]
     return names
 
 
@@ -87,8 +95,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="inference_outputs", help="输出目录")
     parser.add_argument("--results-json", default="inference_results.json",
                         help="结果JSON文件名（相对output_dir）")
-    parser.add_argument("--mode", choices=["seg", "det", "cls"], default="seg",
-                        help="推理模式：seg=分割，det=RF-DETR检测，cls=切片分类/热力图")
+    parser.add_argument("--mode", choices=["seg", "det"], default="seg",
+                        help="推理模式：seg=分割，det=RF-DETR检测")
     parser.add_argument("--visualize", action="store_true", help="是否保存可视化结果")
     parser.add_argument("--visualize-dir", help="可视化输出目录（默认在output_dir下）")
     parser.add_argument("--max-images", type=int, help="最多处理的图像数")
@@ -104,6 +112,24 @@ def parse_args() -> argparse.Namespace:
                         default="windowing", help="图像增强模式")
     parser.add_argument("--font-path", help="可选，指定字体文件以正确显示中文标签")
     parser.add_argument("--font-size", type=int, default=20, help="可视化字体大小")
+    parser.add_argument("--engine", choices=["rfdet", "yolo"], default="rfdet",
+                        help="推理后端：rfdet=RF-DETR，yolo=YOLOv11")
+
+    # 模型通用参数
+    parser.add_argument("--primary-weights",
+                        help="主模型权重（seg/det通用，优先于mode专用权重）")
+    parser.add_argument("--secondary-weights",
+                        help="可选：ROI切片增强模型权重（seg/det通用）")
+    parser.add_argument("--secondary-confidence", type=float,
+                        help="切片模型置信度阈值（默认与主模型一致）")
+    parser.add_argument("--secondary-variant", choices=["medium", "large"],
+                        help="切片检测模型规模（仅det模式有效，覆盖det-secondary-variant）")
+    parser.add_argument("--patch-size", type=int, nargs=2,
+                        help="切片推理窗口尺寸 [height width]，覆盖det-patch-size")
+    parser.add_argument("--patch-overlap", type=float,
+                        help="切片窗口重叠率 (0-1)，覆盖det-patch-overlap")
+    parser.add_argument("--fusion-iou", type=float,
+                        help="主干/切片NMS融合IoU阈值，覆盖det-fusion-iou")
 
     # 分割模式参数
     parser.add_argument("--seg-weights", help="分割模型权重（mode=seg时必填）")
@@ -123,8 +149,8 @@ def parse_args() -> argparse.Namespace:
                         help="RF-DETR优化推理时的batch size")
     parser.add_argument("--det-use-half", action="store_true",
                         help="RF-DETR优化时使用float16")
-    parser.add_argument("--det-class-names", nargs='+',
-                        help="RF-DETR类别名称列表（按类别ID顺序）")
+    parser.add_argument("--class-names", nargs='+',
+                        help="自定义类别名称列表（按类别ID顺序，seg/det通用）")
     parser.add_argument("--det-secondary-weights",
                         help="可选：RF-DETR Medium权重（切片增强分支）")
     parser.add_argument("--det-secondary-confidence", type=float,
@@ -137,34 +163,6 @@ def parse_args() -> argparse.Namespace:
                         help="切片检测窗口重叠率 (0-1)")
     parser.add_argument("--det-fusion-iou", type=float, default=0.5,
                         help="主干/切片分支NMS融合IoU阈值")
-
-    # 切片分类模式参数
-    parser.add_argument("--cls-weights", help="切片分类模型权重（mode=cls时必填）")
-    parser.add_argument("--cls-window-size", type=int, nargs=2,
-                        default=[CLS_DEFAULT_WINDOW, CLS_DEFAULT_WINDOW],
-                        help="切片窗口大小 [height width]")
-    parser.add_argument("--cls-overlap", type=float, default=CLS_DEFAULT_OVERLAP,
-                        help="切片窗口重叠率 (0-1)")
-    parser.add_argument("--cls-confidence", type=float, default=CLS_DEFAULT_CONF,
-                        help="缺陷置信度阈值")
-    parser.add_argument("--cls-defect-classes", type=int, nargs='+',
-                        default=list(CLS_DEFAULT_CLASSES),
-                        help="被视为缺陷的分类ID (空格分隔)")
-    parser.add_argument("--cls-use-confidence-weight", action="store_true",
-                        help="热力图累积使用置信度加权")
-    parser.add_argument("--cls-colormap", default="jet",
-                        choices=['hot', 'jet', 'turbo', 'viridis', 'plasma',
-                                 'coolwarm', 'RdYlBu', 'YlOrRd'],
-                        help="热力图颜色映射")
-    parser.add_argument("--cls-alpha", type=float, default=CLS_DEFAULT_ALPHA,
-                        help="热力图叠加透明度 (0-1)")
-    parser.add_argument("--cls-display-mode", default="overlay",
-                        choices=['overlay', 'contour', 'sparse'],
-                        help="热力图显示模式")
-    parser.add_argument("--cls-heatmap-only", action="store_true",
-                        help="只保存热力图，不叠加原图")
-    parser.add_argument("--cls-no-colorbar", action="store_true",
-                        help="不在结果图上添加颜色条")
 
     return parser.parse_args()
 
@@ -193,187 +191,260 @@ def build_roi_detector(args: argparse.Namespace) -> Optional[WeldROIDetector]:
     )
 
 
-def run_segmentation_mode(args: argparse.Namespace,
-                          image_paths: List[Path],
-                          roi_detector: WeldROIDetector,
-                          visualization_dir: Optional[Path],
-                          font_renderer: FontRenderer) -> List[Dict[str, Any]]:
-    if not args.seg_weights:
-        raise ValueError("seg模式需要提供 --seg-weights")
+def _resolve_primary_weights(args: argparse.Namespace) -> str:
+    if args.primary_weights:
+        return args.primary_weights
+    if args.mode == "seg" and args.seg_weights:
+        return args.seg_weights
+    if args.mode == "det" and args.det_weights:
+        return args.det_weights
+    missing_flag = "--seg-weights" if args.mode == "seg" else "--det-weights"
+    raise ValueError(f"{args.mode} 模式需要提供 {missing_flag} 或 --primary-weights")
 
-    print(f"加载分割模型: {args.seg_weights}")
-    seg_model = YOLO(args.seg_weights)
-    class_names = _load_class_names(args.data_config, seg_model)
 
-    results: List[Dict[str, Any]] = []
+def _resolve_secondary_weights(args: argparse.Namespace) -> Optional[str]:
+    if args.secondary_weights:
+        return args.secondary_weights
+    return args.det_secondary_weights
 
-    for image_path in tqdm(image_paths, desc="推理中"):
-        try:
-            image = load_image(image_path)
-            rois, vis_path = process_roi_and_segmentation(
-                image=image,
-                image_path=image_path,
-                roi_detector=roi_detector,
-                seg_model=seg_model,
-                class_names=class_names,
-                enhance_mode=args.enhance_mode,
-                seg_conf=args.seg_conf,
-                imgsz=args.imgsz,
-                device=args.device,
-                visualize=args.visualize,
-                visualization_dir=visualization_dir,
-                font_renderer=font_renderer
+
+def _resolve_secondary_confidence(args: argparse.Namespace, primary_conf: float) -> float:
+    if args.secondary_confidence is not None:
+        return args.secondary_confidence
+    if args.det_secondary_confidence is not None:
+        return args.det_secondary_confidence
+    return primary_conf
+
+
+def _resolve_secondary_variant(args: argparse.Namespace) -> str:
+    if args.secondary_variant:
+        return args.secondary_variant
+    if args.det_secondary_variant:
+        return args.det_secondary_variant
+    return "medium"
+
+
+def _coerce_patch_size(value: Optional[Sequence[int]]) -> Optional[Tuple[int, int]]:
+    if not value:
+        return None
+    if len(value) != 2:
+        raise ValueError("切片窗口尺寸需要2个整数 [height width]")
+    return int(value[0]), int(value[1])
+
+
+def _resolve_patch_window(args: argparse.Namespace) -> Optional[Tuple[int, int]]:
+    if args.patch_size:
+        return _coerce_patch_size(args.patch_size)
+    return _coerce_patch_size(args.det_patch_size)
+
+
+def _resolve_patch_overlap(args: argparse.Namespace) -> float:
+    if args.patch_overlap is not None:
+        return args.patch_overlap
+    return args.det_patch_overlap
+
+
+def _resolve_fusion_iou(args: argparse.Namespace) -> float:
+    if args.fusion_iou is not None:
+        return args.fusion_iou
+    return args.det_fusion_iou
+
+
+class InferencePipelineRunner:
+    def __init__(self,
+                 args: argparse.Namespace,
+                 roi_detector: WeldROIDetector,
+                 visualization_dir: Optional[Path],
+                 font_renderer: FontRenderer,
+                 debug_root: Optional[Path]):
+        self.args = args
+        self.mode = args.mode
+        self.engine = args.engine
+        self.roi_detector = roi_detector
+        self.visualization_dir = visualization_dir
+        self.visualize = args.visualize
+        self.font_renderer = font_renderer
+        self.debug_root = debug_root
+
+        self._init_engine_components()
+
+        self.primary_weights = _resolve_primary_weights(args)
+        self.primary_confidence = args.det_confidence if self.mode == "det" else args.seg_conf
+        self.secondary_weights = _resolve_secondary_weights(args)
+        self.secondary_confidence = _resolve_secondary_confidence(args, self.primary_confidence)
+        self.patch_window = _resolve_patch_window(args)
+        self.patch_overlap = _resolve_patch_overlap(args)
+        self.fusion_iou = _resolve_fusion_iou(args)
+
+        self.primary_model = self._build_primary_model()
+        self.secondary_model = self._build_secondary_model()
+        self.class_names = self._resolve_class_names()
+        self._apply_class_names()
+
+    def _init_engine_components(self):
+        if self.engine == "rfdet":
+            self.det_model_cls = rfdet_pipeline.RFDetrDetectionModel
+            self.seg_model_cls = rfdet_pipeline.RFDetrSegmentationModel
+            self.detection_config_cls = rfdet_pipeline.RFDetrDetectionConfig
+            self.run_detection_func = rfdet_pipeline.run_rfdet_detection
+            self.process_segmentation_func = rfdet_pipeline.process_roi_and_segmentation
+        elif self.engine == "yolo":
+            self.det_model_cls = yolo_pipeline.YoloDetectionModel
+            self.seg_model_cls = yolo_pipeline.YoloSegmentationModel
+            self.detection_config_cls = yolo_pipeline.YoloDetectionConfig
+            self.run_detection_func = yolo_pipeline.run_yolo_detection
+            self.process_segmentation_func = yolo_pipeline.process_roi_and_segmentation
+        else:
+            raise ValueError(f"不支持的engine: {self.engine}")
+
+    def run(self, image_paths: List[Path]) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        for image_path in tqdm(image_paths, desc="推理中"):
+            try:
+                rois, vis_path, width, height = self._process_image(image_path)
+                results.append({
+                    "mode": self.mode,
+                    "image_path": str(image_path),
+                    "width": width,
+                    "height": height,
+                    "num_rois": len(rois),
+                    "rois": rois,
+                    "visualization": vis_path
+                })
+            except Exception as exc:
+                print(f"[警告] 处理 {image_path} 时出错: {exc}")
+        return results
+
+    def _build_primary_model(self):
+        if self.mode == "det":
+            if self.engine == "rfdet":
+                return self.det_model_cls(
+                    model_path=self.primary_weights,
+                    confidence=self.primary_confidence,
+                    device=self.args.det_device,
+                    optimize=self.args.det_optimize,
+                    optimize_batch=self.args.det_optimize_batch,
+                    use_half=self.args.det_use_half,
+                    class_names=None,
+                    model_variant="large"
+                )
+            return self.det_model_cls(
+                model_path=self.primary_weights,
+                confidence=self.primary_confidence,
+                device=self.args.device or self.args.det_device,
+                class_names=None
             )
-
-            h, w = image.shape[:2]
-            results.append({
-                "mode": "seg",
-                "image_path": str(image_path),
-                "width": w,
-                "height": h,
-                "num_rois": len(rois),
-                "rois": rois,
-                "visualization": vis_path
-            })
-        except Exception as exc:
-            print(f"[警告] 处理 {image_path} 时出错: {exc}")
-
-    return results
-
-
-def run_detection_mode(args: argparse.Namespace,
-                       image_paths: List[Path],
-                       roi_detector: WeldROIDetector,
-                       visualization_dir: Optional[Path],
-                       font_renderer: FontRenderer,
-                       debug_root: Optional[Path]) -> List[Dict[str, Any]]:
-    if not args.det_weights:
-        raise ValueError("det模式需要提供 --det-weights")
-    if roi_detector is None:
-        raise ValueError("det模式必须提供 --roi-weights 以执行ROI检测")
-
-    class_names = args.det_class_names or _load_names_from_yaml(args.data_config)
-    detection_model = RFDetrDetectionModel(
-        model_path=args.det_weights,
-        confidence=args.det_confidence,
-        device=args.det_device,
-        optimize=args.det_optimize,
-        optimize_batch=args.det_optimize_batch,
-        use_half=args.det_use_half,
-        class_names=class_names,
-        model_variant="large"
-    )
-    secondary_model = None
-    if args.det_secondary_weights:
-        secondary_conf = args.det_secondary_confidence if args.det_secondary_confidence is not None else args.det_confidence
-        secondary_variant = args.det_secondary_variant or "medium"
-        secondary_model = RFDetrDetectionModel(
-            model_path=args.det_secondary_weights,
-            confidence=secondary_conf,
-            device=args.det_device,
-            optimize=args.det_optimize,
-            optimize_batch=args.det_optimize_batch,
-            use_half=args.det_use_half,
-            class_names=class_names,
-            model_variant=secondary_variant
+        if self.engine == "rfdet":
+            return self.seg_model_cls(
+                model_path=self.primary_weights,
+                confidence=self.primary_confidence,
+                device=self.args.device,
+                class_names=None
+            )
+        return self.seg_model_cls(
+            model_path=self.primary_weights,
+            confidence=self.primary_confidence,
+            device=self.args.device,
+            class_names=None
         )
 
-    results: List[Dict[str, Any]] = []
+    def _build_secondary_model(self):
+        if not self.secondary_weights:
+            return None
+        if self.mode == "det":
+            if self.engine == "rfdet":
+                variant = _resolve_secondary_variant(self.args)
+                return self.det_model_cls(
+                    model_path=self.secondary_weights,
+                    confidence=self.secondary_confidence,
+                    device=self.args.det_device,
+                    optimize=self.args.det_optimize,
+                    optimize_batch=self.args.det_optimize_batch,
+                    use_half=self.args.det_use_half,
+                    class_names=None,
+                    model_variant=variant
+                )
+            return self.det_model_cls(
+                model_path=self.secondary_weights,
+                confidence=self.secondary_confidence,
+                device=self.args.device or self.args.det_device,
+                class_names=None
+            )
+        if self.engine == "rfdet":
+            return self.seg_model_cls(
+                model_path=self.secondary_weights,
+                confidence=self.secondary_confidence,
+                device=self.args.device,
+                class_names=None
+            )
+        return self.seg_model_cls(
+            model_path=self.secondary_weights,
+            confidence=self.secondary_confidence,
+            device=self.args.device,
+            class_names=None
+        )
 
-    for image_path in tqdm(image_paths, desc="推理中"):
-        try:
-            image = load_image(image_path)
-            image_debug_dir = None
-            if debug_root is not None:
-                image_debug_dir = debug_root / image_path.stem
-            rois, vis_path = process_rfdet_detection(
+    def _resolve_class_names(self) -> List[str]:
+        base_model = getattr(self.primary_model, "model", None)
+        return _load_class_names(self.args.class_names, self.args.data_config, base_model)
+
+    def _apply_class_names(self):
+        if not self.class_names:
+            return
+        if self.mode == "det":
+            self.primary_model.class_map = self.primary_model._build_class_map(self.class_names)
+            if self.secondary_model is not None:
+                self.secondary_model.class_map = self.secondary_model._build_class_map(self.class_names)
+        else:
+            self.primary_model.class_map = self.primary_model._build_class_map(self.class_names)
+            if self.secondary_model is not None:
+                self.secondary_model.class_map = self.secondary_model._build_class_map(self.class_names)
+
+    def _image_debug_dir(self, image_path: Path) -> Optional[Path]:
+        if self.debug_root is None:
+            return None
+        return self.debug_root / image_path.stem
+
+    def _process_image(self, image_path: Path) -> Tuple[List[Dict[str, Any]], Optional[str], int, int]:
+        image = load_image(image_path)
+        h, w = image.shape[:2]
+        debug_dir = self._image_debug_dir(image_path)
+
+        if self.mode == "det":
+            config = self.detection_config_cls(
+                roi_detector=self.roi_detector,
+                detection_model=self.primary_model,
+                secondary_model=self.secondary_model,
+                enhance_mode=self.args.enhance_mode,
+                patch_window=self.patch_window,
+                patch_overlap=self.patch_overlap,
+                fusion_iou=self.fusion_iou,
+                visualize=self.visualize,
+                visualization_dir=self.visualization_dir if self.visualize else None,
+                font_renderer=self.font_renderer,
+                debug_root=debug_dir
+            )
+            rois, vis_path = self.run_detection_func(image, image_path, config)
+        else:
+            if self.roi_detector is None:
+                raise ValueError("seg 模式必须提供 ROI 检测器")
+            rois, vis_path = self.process_segmentation_func(
                 image=image,
                 image_path=image_path,
-                roi_detector=roi_detector,
-                detection_model=detection_model,
-                secondary_model=secondary_model,
-                enhance_mode=args.enhance_mode,
-                patch_window=tuple(args.det_patch_size),
-                patch_overlap=args.det_patch_overlap,
-                fusion_iou=args.det_fusion_iou,
-                visualize=args.visualize,
-                visualization_dir=visualization_dir if args.visualize else None,
-                font_renderer=font_renderer,
-                debug_dir=image_debug_dir
+                roi_detector=self.roi_detector,
+                seg_model=self.primary_model,
+                enhance_mode=self.args.enhance_mode,
+                visualize=self.visualize,
+                visualization_dir=self.visualization_dir if self.visualize else None,
+                font_renderer=self.font_renderer,
+                secondary_model=self.secondary_model,
+                patch_window=self.patch_window,
+                patch_overlap=self.patch_overlap,
+                fusion_iou=self.fusion_iou,
+                debug_dir=debug_dir
             )
 
-            h, w = image.shape[:2]
-            results.append({
-                "mode": "det",
-                "image_path": str(image_path),
-                "width": w,
-                "height": h,
-                "num_rois": len(rois),
-                "rois": rois,
-                "visualization": vis_path
-            })
-        except Exception as exc:
-            print(f"[警告] 处理 {image_path} 时出错: {exc}")
-
-    return results
-
-
-def run_classification_mode(args: argparse.Namespace,
-                            image_paths: List[Path],
-                            roi_detector: Optional[WeldROIDetector],
-                            visualization_dir: Optional[Path]) -> List[Dict[str, Any]]:
-    if not args.cls_weights:
-        raise ValueError("cls模式需要提供 --cls-weights")
-
-    pipeline = SliceClassificationPipeline(
-        model_path=args.cls_weights,
-        window_size=tuple(args.cls_window_size),
-        overlap_ratio=args.cls_overlap,
-        enhance_mode=args.enhance_mode,
-        confidence_threshold=args.cls_confidence,
-        use_confidence_weight=args.cls_use_confidence_weight,
-        colormap=args.cls_colormap,
-        alpha=args.cls_alpha,
-        display_mode=args.cls_display_mode,
-        defect_class_ids=args.cls_defect_classes,
-        roi_detector=roi_detector
-    )
-
-    results: List[Dict[str, Any]] = []
-
-    for image_path in tqdm(image_paths, desc="推理中"):
-        try:
-            image = load_image(image_path)
-            classification_result = pipeline.detect_slice_classify(image, image_id=str(image_path))
-            predictions = classification_result['patch_predictions']
-            heatmap = pipeline.generate_heatmap(image.shape, predictions)
-            stats = SliceClassificationPipeline.generate_statistics(heatmap)
-
-            vis_path = None
-            if args.visualize:
-                if args.cls_heatmap_only:
-                    result_image = pipeline.apply_colormap(heatmap)
-                else:
-                    result_image = pipeline.create_heatmap_overlay(image, heatmap, apply_gaussian_blur=True)
-                if not args.cls_no_colorbar and heatmap.max() > 0:
-                    result_image = pipeline.add_colorbar(result_image, heatmap)
-
-                if visualization_dir is not None:
-                    visualization_dir.mkdir(parents=True, exist_ok=True)
-                    vis_file = visualization_dir / f"{image_path.stem}_heatmap.jpg"
-                else:
-                    vis_file = image_path.with_name(f"{image_path.stem}_heatmap.jpg")
-                cv2.imwrite(str(vis_file), result_image)
-                vis_path = str(vis_file)
-
-            classification_result["mode"] = "cls"
-            classification_result["visualization"] = vis_path
-            classification_result["heatmap_stats"] = stats
-            results.append(classification_result)
-        except Exception as exc:
-            print(f"[警告] 处理 {image_path} 时出错: {exc}")
-
-    return results
+        return rois, vis_path, w, h
 
 
 def main():
@@ -395,12 +466,14 @@ def main():
     if debug_root is not None:
         debug_root.mkdir(parents=True, exist_ok=True)
 
-    if args.mode == "seg":
-        results = run_segmentation_mode(args, image_paths, roi_detector, visualization_dir, font_renderer)
-    elif args.mode == "cls":
-        results = run_classification_mode(args, image_paths, roi_detector, visualization_dir if args.visualize else None)
-    else:
-        results = run_detection_mode(args, image_paths, roi_detector, visualization_dir, font_renderer, debug_root)
+    runner = InferencePipelineRunner(
+        args=args,
+        roi_detector=roi_detector,
+        visualization_dir=visualization_dir,
+        font_renderer=font_renderer,
+        debug_root=debug_root
+    )
+    results = runner.run(image_paths)
 
     results_path = Path(args.results_json)
     if not results_path.is_absolute():

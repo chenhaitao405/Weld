@@ -3,17 +3,17 @@ from pathlib import Path
 
 from rfdetr import RFDETRBase, RFDETRLarge, RFDETRSegPreview
 
-model = RFDETRSegPreview()
+model = RFDETRSegPreview(pretrain_weights = "rf-detr-seg-preview.pt")
 
 training_args = {
-    "dataset_dir": "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/roi2_merge/coco_seg_resize",
+    "dataset_dir": "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/roi2_merge/patch_432_coco",
     "epochs": 500,
-    "batch_size": 4,
-    "grad_accum_steps": 2,
+    "batch_size": 1,
+    "grad_accum_steps": 4,
     "lr": 1e-4,
-    "output_dir": "./runs/detrm_seg",
+    "output_dir": "./runs/detrm_seg_patch/patch432",
     "early_stopping": True,
-    "run":"4batch"
+    "run":"4batch",
 }
 
 output_dir = Path(training_args["output_dir"]).resolve()

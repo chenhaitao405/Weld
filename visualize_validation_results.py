@@ -478,6 +478,7 @@ const STATUS_SUCCESS_CLASS = STATUS_ORDER[0];
 const STATUS_SUCCESS_DETECT = STATUS_ORDER[1];
 const STATUS_MISSED = STATUS_ORDER[2];
 const STATUS_FALSE = STATUS_ORDER[3];
+const POLYGON_FILL_ALPHA = 0.35;
 
 const state = {
   showPred: true,
@@ -904,7 +905,7 @@ function drawPolygon(ctx, polygon, color) {
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   ctx.stroke();
-  ctx.globalAlpha = 0.25;
+  ctx.globalAlpha = POLYGON_FILL_ALPHA;
   ctx.fillStyle = color;
   ctx.fill();
   ctx.globalAlpha = 1;
