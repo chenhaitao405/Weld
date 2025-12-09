@@ -173,7 +173,7 @@ class YOLOFormatConverter:
 
         # 处理图像
         if copy_images:
-            print("复制图像文件...")
+            print("建立图像软链接...")
             self._copy_images()
 
         # 处理标签
@@ -247,16 +247,44 @@ class YOLOFormatConverter:
             self._recalculate_statistics()
         self._print_statistics()
 
+    @staticmethod
+    def _link_image_file(source: Path, target: Path):
+        """为图像创建软链接，失败时回退到复制。"""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink():
+            target.unlink()
+        try:
+            os.symlink(source.resolve(), target)
+        except OSError:
+            shutil.copy2(source, target)
+
     def _copy_images(self):
-        """复制图像目录"""
+        """链接图像目录（软链接，必要时回退复制）"""
         input_images_dir = self.input_dir / 'images'
         output_images_dir = self.output_dir / 'images'
 
-        if input_images_dir.exists():
-            shutil.copytree(input_images_dir, output_images_dir, dirs_exist_ok=True)
-            print("图像复制完成")
-        else:
+        if not input_images_dir.exists():
             print(f"警告: 未找到图像目录 {input_images_dir}")
+            return
+
+        output_images_dir.mkdir(parents=True, exist_ok=True)
+        split_dirs = [d for d in input_images_dir.iterdir() if d.is_dir()]
+
+        if split_dirs:
+            for split_dir in sorted(split_dirs, key=lambda p: p.name):
+                target_split_dir = output_images_dir / split_dir.name
+                target_split_dir.mkdir(parents=True, exist_ok=True)
+                image_files = find_image_files(str(split_dir))
+                for image_path in image_files:
+                    target_path = target_split_dir / image_path.name
+                    self._link_image_file(image_path, target_path)
+        else:
+            image_files = find_image_files(str(input_images_dir))
+            for image_path in image_files:
+                target_path = output_images_dir / image_path.name
+                self._link_image_file(image_path, target_path)
+
+        print("图像链接完成")
 
     def _convert_labels_to_det(self):
         """转换标签为检测格式"""
@@ -455,7 +483,7 @@ class YOLOFormatConverter:
             target_dir.mkdir(parents=True, exist_ok=True)
 
             target_path = target_dir / image_file.name
-            shutil.copy2(image_file, target_path)
+            self._link_image_file(image_file, target_path)
 
             self.total_converted += 1
 

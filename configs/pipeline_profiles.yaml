@@ -5,9 +5,10 @@ profiles:
     platform: Linux
     description: Default自采数据集1120
     paths:
-      base_path: /home/lenovo/code/CHT/datasets/Xray/self/1120/labeled
-      json_base_path: /home/lenovo/code/CHT/datasets/Xray/self/1120/adjust
-      output_base_dir: roi2_unify
+      base_path: /datasets/PAR/Xray/self/1120/labeled
+      json_base_path: /datasets/PAR/Xray/self/1120/adjust
+      output_base_dir: roi2_merge
+      reference_label_map_path: roi2_merge/yolo/dataset.yaml
     datasets:
       - D1
       - D2
@@ -19,8 +20,8 @@ profiles:
       yolo_dir: yolo
       roi_dir: ROI
       roi_rotate: ROI_rotate
-      patch_dir: patch_
-      cls_dir: det
+      patch_dir: patch_640
+      cls_dir: patch_det
     params:
       labelme2yolo:
         seg: true
@@ -38,7 +39,7 @@ profiles:
       patchandenhance:
         overlap: 0.7
         enhance_mode: windowing
-        no_slice: true
+        no_slice: false
         window_size: [640, 640]
         label_mode: seg
         script_path: convert/pj/patchandenhance.py
@@ -52,9 +53,10 @@ profiles:
     platform: Linux
     description: 12月5日客户新标注数据
     paths:
-      base_path: /home/lenovo/code/CHT/datasets/Xray/self/1208
-      json_base_path: /home/lenovo/code/CHT/datasets/Xray/self/1208/adjust_label
+      base_path: /datasets/PAR/Xray/self/1208
+      json_base_path: /datasets/PAR/Xray/self/1208/adjust_label
       output_base_dir: roi2_merge
+      reference_label_map_path: roi2_merge/yolo/dataset.yaml
     datasets:
       - 6-1_8bit
       - 6-2_8bit
@@ -68,14 +70,57 @@ profiles:
       
     outputs:
       yolo_dir: yolo
-      roi_dir: ROI
+      roi_dir: ROI_1205
       roi_rotate: ROI_rotate
       patch_dir: patch_
-      cls_dir: det
+      cls_dir: patch_det
     params:
       labelme2yolo:
         seg: true
-        unify_to_crack: true
+        unify_to_crack: false
+        script_path: convert/labelme2yolo.py
+      yolo_roi_extractor:
+        model_path: /home/lenovo/code/CHT/detect/ultralytics-main/runs/detect/1208crack_pretrain22/weights/best.pt
+        roi_conf: 0.25
+        roi_iou: 0.45
+        padding: 0.1
+        mode: seg
+        script_path: convert/pj/yolo_roi_extractor.py
+      rotate_yolo:
+        script_path: convert/pj/rotateYOLOdate.py
+      patchandenhance:
+        overlap: 0.5
+        enhance_mode: windowing
+        no_slice: false
+        window_size: [640, 640]
+        label_mode: seg
+        script_path: convert/pj/patchandenhance.py
+      seg2det:
+        mode: det
+        script_path: convert/pj/seg2det.py
+        balance_data: true
+
+  linux_SWRD_folder:
+    platform: Linux
+    description: 12月5日客户新标注数据
+    paths:
+      base_path: /datasets/PAR/Xray/opensource/SWRD8bit
+      json_base_path: /datasets/PAR/Xray/opensource/SWRD8bit/swr_pipeline
+      output_base_dir: swr_pipeline
+      reference_label_map_path: roi2_merge/yolo/dataset.yaml
+    datasets:
+
+
+    outputs:
+      yolo_dir: yolo
+      roi_dir: ROI_jpg
+      roi_rotate: ROI_rotate
+      patch_dir: patch_noslice
+      cls_dir: patch_det
+    params:
+      labelme2yolo:
+        seg: true
+        unify_to_crack: false
         script_path: convert/labelme2yolo.py
       yolo_roi_extractor:
         model_path: ./model/weldROI2.pt
@@ -87,7 +132,7 @@ profiles:
       rotate_yolo:
         script_path: convert/pj/rotateYOLOdate.py
       patchandenhance:
-        overlap: 0.7
+        overlap: 0.5
         enhance_mode: windowing
         no_slice: true
         window_size: [640, 640]

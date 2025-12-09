@@ -8,15 +8,14 @@ from rfdetr import RFDETRBase, RFDETRLarge, RFDETRSegPreview
 model = RFDETRLarge()
 
 training_args = {
-    "dataset_dir": "/datasets/PAR/Xray/opensource/SWRD8bit/swr_pipeline/patch_det_coco",
+    "dataset_dir": "/home/lenovo/code/CHT/datasets/auto_mix_runs_noslice/ratio_p050/coco",
     "epochs": 500,
     "batch_size": 2,
     "grad_accum_steps": 8,
     "lr": 1e-4,
-    "output_dir": "./runs/1208/detrlarge/SWRD_patch640_res560_continue",
+    "output_dir": "./runs/1208/detrlarge/mixed50_noslice",
     "early_stopping": True,
     "run":"4batch",
-    "resume" : "train/runs/1208/detrlarge/SWRD_patch640_res560/checkpoint_best_regular.pth",
     # "resolution": 1120
 }
 
@@ -79,7 +78,6 @@ with _log_terminal_output(log_file_path):
         early_stopping=training_args["early_stopping"],
         run = training_args["run"],
         # resolution = training_args["resolution"]
-        resume = training_args["resume"],
     )
 
     config_path = output_dir / "train_params.json"

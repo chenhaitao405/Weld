@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 import json
-from typing import List, Dict, Set
+from typing import List, Dict
 from collections import OrderedDict
 from pathlib import Path
 import platform
@@ -23,6 +23,7 @@ ACTIVE_PROFILE_NAME = None
 BASE_PATH = ""
 JSON_BASE_PATH = ""
 OUTPUT_BASE_DIR = ""
+REFERENCE_LABEL_MAP_PATH = ""
 DATASETS: List[str] = []
 OUTPUT_CONFIG: Dict[str, str] = {}
 FIXED_PARAMS: Dict[str, Dict] = {}
@@ -153,6 +154,7 @@ def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
     global CONFIG_PATH, ACTIVE_PROFILE_NAME, BASE_PATH, JSON_BASE_PATH
     global OUTPUT_BASE_DIR, DATASETS, OUTPUT_CONFIG, FIXED_PARAMS
     global PARAM_LOG_PATH, PARAM_LOG
+    global REFERENCE_LABEL_MAP_PATH
 
     paths_section = profile_data.get("paths") or {}
     base_path_raw = paths_section.get("base_path")
@@ -163,12 +165,17 @@ def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
         raise ValueError(f"profile {profile_name} 缺少 paths.json_base_path")
 
     output_base_raw = paths_section.get("output_base_dir") or "pipeline_outputs"
+    labelme_params = (profile_data.get("params") or {}).get("labelme2yolo", {})
+    reference_label_map_raw = paths_section.get("reference_label_map_path")
+    if not reference_label_map_raw and not labelme_params.get("unify_to_crack"):
+        raise ValueError(f"profile {profile_name} 缺少 paths.reference_label_map_path")
 
     CONFIG_PATH = config_path
     ACTIVE_PROFILE_NAME = profile_name
     BASE_PATH = resolve_path(base_path_raw)
     JSON_BASE_PATH = resolve_path(json_base_raw)
     OUTPUT_BASE_DIR = resolve_path(output_base_raw, BASE_PATH)
+    REFERENCE_LABEL_MAP_PATH = resolve_path(reference_label_map_raw, BASE_PATH) if reference_label_map_raw else ""
 
     datasets = profile_data.get("datasets") or []
     if not isinstance(datasets, list):
@@ -200,11 +207,36 @@ def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
         "config_profile": ACTIVE_PROFILE_NAME,
         "base_path": BASE_PATH,
         "json_base_path": JSON_BASE_PATH,
+        "reference_label_map_path": REFERENCE_LABEL_MAP_PATH,
         "datasets": list(DATASETS),
         "output_base_dir": OUTPUT_BASE_DIR,
         "selected_steps": [],
         "commands": []
     }
+
+# ===========================================================================
+
+def load_label_map_from_yaml(yaml_path: str) -> OrderedDict:
+    """从 dataset.yaml 读取 label_id_map。"""
+    if not yaml_path:
+        raise ValueError("缺少参考 dataset.yaml 路径")
+
+    yaml_file = Path(yaml_path)
+    if not yaml_file.exists():
+        raise FileNotFoundError(f"参考 dataset.yaml 不存在: {yaml_file}")
+
+    try:
+        with yaml_file.open("r", encoding="utf-8") as f:
+            yaml_data = yaml.safe_load(f)
+    except yaml.YAMLError as err:
+        raise RuntimeError(f"解析 {yaml_file} 失败: {err}") from err
+
+    label_map_raw = yaml_data.get("label_id_map") if yaml_data else None
+    if not isinstance(label_map_raw, dict):
+        raise ValueError(f"{yaml_file} 缺少有效的 label_id_map")
+
+    ordered_pairs = sorted(label_map_raw.items(), key=lambda item: item[1])
+    return OrderedDict(ordered_pairs)
 
 # ===========================================================================
 
@@ -278,7 +310,8 @@ def validate_steps(steps_str: str) -> List[str]:
     return steps
 
 def collect_all_labels(datasets: List[str], json_base_path: str,
-                       unify_to_crack: bool = False) -> OrderedDict:
+                       unify_to_crack: bool = False,
+                       reference_label_map_path: str = None) -> OrderedDict:
     """
     收集所有数据集的标签，建立统一的标签映射
     """
@@ -287,6 +320,14 @@ def collect_all_labels(datasets: List[str], json_base_path: str,
         print("\n📊 启用了 unify_to_crack，所有标签将统一为 'crack'")
         label_map = OrderedDict([('crack', 0)])
         print(f"📋 统一标签映射：{dict(label_map)}")
+        return label_map
+
+    if reference_label_map_path:
+        print("\n📊 从参考 dataset.yaml 读取标签映射...")
+        label_map = load_label_map_from_yaml(reference_label_map_path)
+        print(f"📋 引用 {reference_label_map_path} 中的 label_id_map：")
+        for label, idx in label_map.items():
+            print(f"  {idx}: {label}")
         return label_map
 
     print("\n📊 收集所有数据集的标签...")
@@ -373,7 +414,12 @@ def process_labelme2yolo_unified(datasets: List[str], base_path: str,
         print("\n⚠️ 注意：已启用 unify_to_crack，所有标签将被统一为 'crack'")
 
     # 第一步：收集所有标签，建立统一映射
-    label_map = collect_all_labels(datasets, json_base_path, unify_to_crack)
+    label_map = collect_all_labels(
+        datasets,
+        json_base_path,
+        unify_to_crack,
+        REFERENCE_LABEL_MAP_PATH
+    )
 
     if not label_map:
         print("❌ 错误：未找到任何标签！")
