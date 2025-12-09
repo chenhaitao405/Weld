@@ -8,6 +8,7 @@ YOLO → COCO 标注转换脚本
   python convert/yolo2coco.py --input_dir /path/to/yolo_dataset --output_dir /path/to/coco_dataset
 """
 
+import os
 import sys
 import json
 import shutil
@@ -234,6 +235,17 @@ def _yolo_segmentation_to_coco(label: List[float],
     return [abs_coords], bbox, round(area, 6)
 
 
+def _link_image_file(source: Path, target: Path):
+    """为图像创建软链接，失败时回退到复制。"""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    try:
+        os.symlink(source.resolve(), target)
+    except OSError:
+        shutil.copy2(source, target)
+
+
 def _convert_split_to_coco(split_name: str,
                            split_images_dir: Path,
                            split_labels_dir: Path,
@@ -261,7 +273,7 @@ def _convert_split_to_coco(split_name: str,
 
     for image_path in tqdm(image_files, desc=f"YOLO→COCO {split_name}"):
         width, height = _read_image_size(image_path)
-        shutil.copy2(image_path, target_split_dir / image_path.name)
+        _link_image_file(image_path, target_split_dir / image_path.name)
 
         coco_images.append({
             "id": image_id,

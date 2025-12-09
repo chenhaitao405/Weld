@@ -21,8 +21,8 @@ from PIL import Image
 from tqdm import tqdm
 import yaml
 
-from rfdetr import RFDETRMedium #or RFDETRBASE
-from utils.pipeline_utils import FontRenderer, draw_detection_instance, ensure_color
+from rfdetr import RFDETRMedium, RFDETRSegPreview  # or RFDETRBASE
+from utils.pipeline_utils import COLOR_PALETTE, FontRenderer, draw_detection_instance, ensure_color
 
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_WEIGHTS,
         help="训练好的权重（checkpoint_best_ema.pth）",
+    )
+    parser.add_argument(
+        "--task",
+        choices=["det", "seg"],
+        default="det",
+        help="推理任务模式：det=检测，seg=分割",
     )
     parser.add_argument(
         "--output-dir",
@@ -91,6 +97,17 @@ def parse_args() -> argparse.Namespace:
         help="优化推理时使用 float16 精度（需 GPU 支持）",
     )
     parser.add_argument(
+        "--mask-alpha",
+        type=float,
+        default=0.45,
+        help="分割可视化透明度（仅 seg 模式生效）",
+    )
+    parser.add_argument(
+        "--save-masks",
+        action="store_true",
+        help="分割模式下保存每个实例的二值掩码",
+    )
+    parser.add_argument(
         "--font-path",
         type=Path,
         help="可选：指定支持中文的TTF/TTC字体文件，用于绘制标签",
@@ -127,7 +144,7 @@ def load_rgb_image(path: Path) -> Image.Image:
         return img.convert("RGB")
 
 
-def build_class_name_map_from_model(model: RFDETRMedium) -> Dict[int, str]:
+def build_class_name_map_from_model(model) -> Dict[int, str]:
     raw_names = getattr(model, "class_names", {}) or {}
     if isinstance(raw_names, dict):
         return {int(k): str(v) for k, v in raw_names.items()}
@@ -181,7 +198,7 @@ def infer_class_map_from_dataset_yaml(image_dir: Path) -> Optional[Dict[int, str
     return None
 
 
-def build_effective_class_map(args: argparse.Namespace, model: RFDETRMedium) -> Dict[int, str]:
+def build_effective_class_map(args: argparse.Namespace, model) -> Dict[int, str]:
     if args.class_names:
         return {idx: str(name) for idx, name in enumerate(args.class_names)}
     if args.categories_json:
@@ -227,6 +244,37 @@ def draw_detections(image: np.ndarray,
     return annotated
 
 
+def draw_segmentations(image: np.ndarray,
+                       detections,
+                       label_map: Dict[int, str],
+                       font_renderer: Optional[FontRenderer],
+                       mask_alpha: float) -> np.ndarray:
+    annotated = ensure_color(image.copy())
+    masks = getattr(detections, "mask", None)
+    if masks is None or len(masks) == 0:
+        return draw_detections(annotated, detections, label_map, font_renderer)
+
+    overlay = annotated.copy()
+    for bbox, score, cls_id, mask in zip(
+        detections.xyxy, detections.confidence, detections.class_id, masks
+    ):
+        cls_int = int(cls_id)
+        color = COLOR_PALETTE[cls_int % len(COLOR_PALETTE)]
+        binary_mask = (mask.astype(np.float32) > 0.5)
+        overlay[binary_mask] = color
+        draw_detection_instance(
+            annotated,
+            bbox=bbox.tolist(),
+            label=resolve_label(cls_int, label_map),
+            score=float(score),
+            class_id=cls_int,
+            font_renderer=font_renderer,
+        )
+
+    cv2.addWeighted(overlay, mask_alpha, annotated, 1 - mask_alpha, 0, annotated)
+    return annotated
+
+
 def main() -> None:
     args = parse_args()
     image_paths: List[Path] = list(iter_images(args.image_dir))
@@ -241,13 +289,18 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     vis_dir = args.output_dir / "visualizations"
     vis_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir = None
+    if args.task == "seg" and args.save_masks:
+        mask_dir = args.output_dir / "masks"
+        mask_dir.mkdir(parents=True, exist_ok=True)
 
     model_kwargs = {"pretrain_weights": str(args.weights)}
     if args.device:
         model_kwargs["device"] = args.device
 
-    print(f"加载RF-DETR模型: {args.weights}")
-    model = RFDETRMedium(**model_kwargs)
+    model_cls = RFDETRSegPreview if args.task == "seg" else RFDETRMedium
+    print(f"加载RF-DETR模型({args.task}): {args.weights}")
+    model = model_cls(**model_kwargs)
     if args.optimize:
         import torch
 
@@ -280,7 +333,12 @@ def main() -> None:
         if image_bgr is None:
             print(f"[警告] 读取失败，跳过: {image_path}")
             continue
-        annotated = draw_detections(image_bgr, detections, class_map, font_renderer)
+        if args.task == "seg":
+            annotated = draw_segmentations(
+                image_bgr, detections, class_map, font_renderer, args.mask_alpha
+            )
+        else:
+            annotated = draw_detections(image_bgr, detections, class_map, font_renderer)
 
         try:
             rel = image_path.relative_to(args.image_dir)
@@ -291,17 +349,28 @@ def main() -> None:
         cv2.imwrite(str(save_path), annotated)
 
         det_list = []
-        for bbox, score, cls_id in zip(
+        masks_array = getattr(detections, "mask", None)
+        for idx, (bbox, score, cls_id) in enumerate(zip(
             detections.xyxy, detections.confidence, detections.class_id
-        ):
+        )):
             cls_id_int = int(cls_id)
             per_class_counter[cls_id_int] += 1
+            mask_path = None
+            if args.task == "seg" and masks_array is not None and idx < len(masks_array):
+                binary_mask = (masks_array[idx] > 0.5).astype(np.uint8) * 255
+                if args.save_masks:
+                    mask_rel = rel.with_name(f"{rel.stem}_mask_{idx:02d}.png")
+                    mask_out = (mask_dir / mask_rel) if mask_dir is not None else args.output_dir / mask_rel
+                    mask_out.parent.mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(str(mask_out), binary_mask)
+                    mask_path = str(mask_out)
             det_list.append(
                 {
                     "bbox_xyxy": [float(x) for x in bbox.tolist()],
                     "score": float(score),
                     "class_id": cls_id_int,
                     "label": resolve_label(cls_id_int, class_map),
+                    "mask_path": mask_path,
                 }
             )
 
@@ -319,6 +388,8 @@ def main() -> None:
         "image_dir": str(args.image_dir),
         "num_images": len(inference_records),
         "confidence_threshold": args.confidence,
+        "task": args.task,
+        "save_masks": args.save_masks,
         "class_distribution": [
             {
                 "class_id": cls_id,

@@ -5,17 +5,28 @@ from pathlib import Path
 from typing import Dict, List
 
 # 基础路径配置
-BASE_PATH = r"C:\Users\CHT\Desktop\datasets1117\labeled"
-OUTPUT_PATH = r"C:\Users\CHT\Desktop\datasets1117\adjust"
+BASE_PATH ="/home/lenovo/code/CHT/datasets/Xray/self/1208"
+OUTPUT_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1208/adjust_label"
 
 # 数据集列表
+# DATASETS = [
+#     "D1",
+#     "D2",
+#     "D3",
+#     "D4",
+#     "img20250608",
+#     "img20250609"
+# ]
+
 DATASETS = [
-    "D1",
-    "D2",
-    "D3",
-    "D4",
-    "img20250608",
-    "img20250609"
+    "6-1_8bit",
+    "6-2_8bit",
+    "7-1_8bit",
+    "7-2_8bit",
+    "8_8bit",
+    "9-1_8bit",
+    "9-2_8bit",
+    "DP_8bit"
 ]
 
 # 标注类型映射关系
@@ -42,6 +53,8 @@ LABEL_MAPPING = {
     "圆形缺陷": "圆形缺陷",
     "气孔": "圆形缺陷",
     "密孔": "圆形缺陷",
+    "深孔": "圆形缺陷",
+    "链状气孔": "圆形缺陷",
 
     # 咬边类
     "咬边": "咬边",

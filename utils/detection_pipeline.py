@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -8,15 +9,28 @@ import numpy as np
 from PIL import Image
 
 from convert.pj.yolo_roi_extractor import WeldROIDetector
-from rfdetr import RFDETRMedium, RFDETRLarge
+from rfdetr import RFDETRMedium, RFDETRLarge, RFDETRSegPreview
 from utils import enhance_image, calculate_stride, sliding_window_crop
 from utils.pipeline_utils import (
     FontRenderer,
     align_roi_orientation,
     ensure_color,
     restore_bbox_from_rotation,
+    restore_polygon_from_rotation,
     draw_detection_instance
 )
+
+
+def _ensure_single_prediction(detections: Any):
+    if detections is None:
+        return None
+    if isinstance(detections, list):
+        if len(detections) == 0:
+            return None
+        if len(detections) == 1:
+            return detections[0]
+        raise RuntimeError("RF-DETR返回了批量结果，请逐个调用predict")
+    return detections
 
 
 class RFDetrDetectionModel:
@@ -71,7 +85,7 @@ class RFDetrDetectionModel:
         patch_rgb = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(patch_rgb)
         detections = self.model.predict(pil_image, threshold=self.confidence)
-        detections = self._ensure_single_output(detections)
+        detections = _ensure_single_prediction(detections)
         if detections is None or len(getattr(detections, "xyxy", [])) == 0:
             return []
 
@@ -88,20 +102,232 @@ class RFDetrDetectionModel:
             results.append(result)
         return results
 
-    @staticmethod
-    def _ensure_single_output(detections: Any):
-        if detections is None:
-            return None
-        if isinstance(detections, list):
-            if len(detections) == 0:
-                return None
-            if len(detections) == 1:
-                return detections[0]
-            raise RuntimeError("RF-DETR返回了批量结果，请逐个调用predict")
-        return detections
+
+class RFDetrSegmentationModel:
+    """RF-DETR SegPreview 分割推理包装器"""
+
+    def __init__(self,
+                 model_path: str,
+                 confidence: float = 0.25,
+                 device: Optional[str] = None,
+                 class_names: Optional[Sequence[str]] = None):
+        self.model_path = Path(model_path)
+        if not self.model_path.exists():
+            raise FileNotFoundError(f"未找到RF-DETR分割权重: {self.model_path}")
+        self.confidence = confidence
+        kwargs: Dict[str, Any] = {"pretrain_weights": str(self.model_path)}
+        if device:
+            kwargs["device"] = device
+        self.model = RFDETRSegPreview(**kwargs)
+        self.class_map = self._build_class_map(class_names)
+
+    def _build_class_map(self, class_names: Optional[Sequence[str]]) -> Dict[int, str]:
+        if class_names:
+            return {idx: str(name) for idx, name in enumerate(class_names)}
+        raw_names = getattr(self.model, "class_names", None)
+        if isinstance(raw_names, dict):
+            return {int(k): str(v) for k, v in raw_names.items()}
+        if isinstance(raw_names, (list, tuple)):
+            return {idx: str(name) for idx, name in enumerate(raw_names)}
+        return {}
+
+    def infer(self,
+              image_bgr: np.ndarray,
+              rotation_meta: Optional[Dict[str, Any]],
+              visualize: bool,
+              font_renderer: Optional[FontRenderer]) -> Tuple[List[Dict[str, Any]], Optional[np.ndarray]]:
+        pil_image = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
+        detections = self.model.predict(pil_image, threshold=self.confidence)
+        detections = _ensure_single_prediction(detections)
+        if detections is None or len(getattr(detections, "xyxy", [])) == 0:
+            canvas = ensure_color(image_bgr.copy()) if visualize else None
+            return [], _restore_canvas_from_rotation(canvas, rotation_meta)
+
+        vis_canvas = ensure_color(image_bgr.copy()) if visualize else None
+        masks = getattr(detections, "mask", None)
+        defects: List[Dict[str, Any]] = []
+
+        for idx, (bbox, score, cls_id) in enumerate(zip(
+            detections.xyxy, detections.confidence, detections.class_id
+        )):
+            bbox_list = [float(v) for v in bbox.tolist()]
+            cls_int = int(cls_id)
+            polygon: List[List[float]] = []
+            if masks is not None and idx < len(masks):
+                polygon = _mask_to_polygon(masks[idx])
+            if not polygon:
+                polygon = _bbox_to_polygon(bbox_list)
+            defect = {
+                "class_id": cls_int,
+                "class_name": resolve_label(cls_int, self.class_map),
+                "confidence": float(score),
+                "bbox": bbox_list,
+                "polygon": polygon
+            }
+            defects.append(defect)
+
+            if vis_canvas is not None:
+                draw_detection_instance(
+                    vis_canvas,
+                    bbox=bbox_list,
+                    label=defect["class_name"],
+                    score=float(score),
+                    class_id=cls_int,
+                    font_renderer=font_renderer,
+                    polygon=polygon
+                )
+
+        return defects, _restore_canvas_from_rotation(vis_canvas, rotation_meta)
 
 
-def process_roi_and_detection(
+def run_rfdet_segmentation(image: np.ndarray,
+                           image_path: Path,
+                           seg_model: RFDetrSegmentationModel,
+                           visualize: bool,
+                           visualization_dir: Optional[Path],
+                           font_renderer: Optional[FontRenderer],
+                           roi_bbox: Optional[Sequence[int]] = None,
+                           rotation_meta: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    defects, vis_canvas = seg_model.infer(image, rotation_meta=rotation_meta, visualize=visualize, font_renderer=font_renderer)
+    h, w = image.shape[:2]
+    bbox = roi_bbox if roi_bbox is not None else [0, 0, w, h]
+    rois = [{
+        "roi_index": 0,
+        "bbox": [int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])],
+        "num_defects": len(defects),
+        "defects": defects
+    }]
+
+    vis_path = None
+    if vis_canvas is not None and visualize and visualization_dir is not None:
+        visualization_dir.mkdir(parents=True, exist_ok=True)
+        vis_file = visualization_dir / f"{image_path.stem}_seg.jpg"
+        cv2.imwrite(str(vis_file), vis_canvas)
+        vis_path = str(vis_file)
+
+    return rois, vis_path
+
+
+def process_roi_and_segmentation(
+        image: np.ndarray,
+        image_path: Path,
+        roi_detector: WeldROIDetector,
+        seg_model: RFDetrSegmentationModel,
+        enhance_mode: str,
+        visualize: bool,
+        visualization_dir: Optional[Path],
+        font_renderer: Optional[FontRenderer],
+        secondary_model: Optional[RFDetrSegmentationModel] = None,
+        patch_window: Optional[Tuple[int, int]] = None,
+        patch_overlap: float = 0.2,
+        fusion_iou: float = 0.5,
+        debug_dir: Optional[Path] = None) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    img_h, img_w = image.shape[:2]
+    roi_boxes = roi_detector.detect_with_padding(image)
+    if not roi_boxes:
+        roi_boxes = [(0, 0, img_w, img_h)]
+
+    vis_image = ensure_color(image.copy()) if visualize else None
+    roi_results: List[Dict[str, Any]] = []
+
+    for roi_idx, (x1, y1, x2, y2) in enumerate(roi_boxes):
+        x1_i, y1_i, x2_i, y2_i = map(int, [x1, y1, x2, y2])
+        roi_patch = image[y1_i:y2_i, x1_i:x2_i]
+        if roi_patch.size == 0:
+            continue
+
+        roi_debug_dir = (debug_dir / f"roi_{roi_idx:02d}") if debug_dir else None
+        aligned_roi, rotation_meta = align_roi_orientation(roi_patch)
+        enhanced_roi = enhance_image(aligned_roi, mode=enhance_mode, output_bits=8)
+        primary_defects, _ = seg_model.infer(enhanced_roi, rotation_meta=rotation_meta,
+                                             visualize=False, font_renderer=None)
+        if roi_debug_dir is not None:
+            _save_debug_image(ensure_color(enhanced_roi), primary_defects,
+                              roi_debug_dir / "primary_input.jpg", font_renderer)
+        primary_defects = _restore_segments_from_alignment(primary_defects, rotation_meta)
+        mapped_primary = _map_to_image(primary_defects, x1_i, y1_i, img_w, img_h, source="primary")
+
+        secondary_mapped: List[Dict[str, Any]] = []
+        if secondary_model is not None and patch_window is not None:
+            patch_debug_dir = (roi_debug_dir / "patches") if roi_debug_dir else None
+            patch_defects = _run_patch_segmentation(
+                aligned_roi=aligned_roi,
+                rotation_meta=rotation_meta,
+                secondary_model=secondary_model,
+                enhance_mode=enhance_mode,
+                window_size=patch_window,
+                overlap=patch_overlap,
+                debug_dir=patch_debug_dir,
+                font_renderer=font_renderer
+            )
+            secondary_mapped = _map_to_image(patch_defects, x1_i, y1_i, img_w, img_h, source="patch")
+
+        merged_defects = mapped_primary + secondary_mapped
+        if secondary_mapped:
+            merged_defects = _apply_classwise_nms(merged_defects, fusion_iou)
+
+        if vis_image is not None:
+            for det in merged_defects:
+                _draw_detection(vis_image, det, font_renderer)
+
+        roi_payload: Dict[str, Any] = {
+            "roi_index": roi_idx,
+            "bbox": [x1_i, y1_i, x2_i, y2_i],
+            "num_defects": len(merged_defects),
+            "defects": merged_defects
+        }
+        if secondary_mapped:
+            roi_payload["primary_defects"] = len(mapped_primary)
+            roi_payload["secondary_defects"] = len(secondary_mapped)
+
+        roi_results.append(roi_payload)
+
+    vis_path = None
+    if visualize and vis_image is not None and visualization_dir is not None:
+        visualization_dir.mkdir(parents=True, exist_ok=True)
+        vis_file = visualization_dir / f"{image_path.stem}_seg.jpg"
+        cv2.imwrite(str(vis_file), vis_image)
+        vis_path = str(vis_file)
+
+    return roi_results, vis_path
+
+
+@dataclass
+class RFDetrDetectionConfig:
+    roi_detector: Optional[WeldROIDetector]
+    detection_model: RFDetrDetectionModel
+    secondary_model: Optional[RFDetrDetectionModel] = None
+    enhance_mode: str = "windowing"
+    patch_window: Optional[Tuple[int, int]] = None
+    patch_overlap: float = 0.2
+    fusion_iou: float = 0.5
+    visualize: bool = False
+    visualization_dir: Optional[Path] = None
+    font_renderer: Optional[FontRenderer] = None
+    debug_root: Optional[Path] = None
+
+
+def run_rfdet_detection(image: np.ndarray,
+                        image_path: Path,
+                        config: RFDetrDetectionConfig) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    return _process_roi_and_detection(
+        image=image,
+        image_path=image_path,
+        roi_detector=config.roi_detector,
+        detection_model=config.detection_model,
+        secondary_model=config.secondary_model,
+        enhance_mode=config.enhance_mode,
+        patch_window=config.patch_window,
+        patch_overlap=config.patch_overlap,
+        fusion_iou=config.fusion_iou,
+        visualize=config.visualize,
+        visualization_dir=config.visualization_dir,
+        font_renderer=config.font_renderer,
+        debug_dir=config.debug_root
+    )
+
+
+def _process_roi_and_detection(
         image: np.ndarray,
         image_path: Path,
         roi_detector: Optional[WeldROIDetector],
@@ -161,8 +387,7 @@ def process_roi_and_detection(
 
         if vis_image is not None:
             for det in merged_detections:
-                _draw_detection(vis_image, det["bbox"], det["class_name"],
-                                det["confidence"], det["class_id"], font_renderer)
+                _draw_detection(vis_image, det, font_renderer)
 
         roi_payload = {
             "roi_index": roi_idx,
@@ -198,6 +423,24 @@ def _restore_detections_from_alignment(detections: List[Dict[str, Any]],
     return restored
 
 
+def _restore_segments_from_alignment(defects: List[Dict[str, Any]],
+                                     rotation_meta: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not rotation_meta:
+        return defects
+    restored: List[Dict[str, Any]] = []
+    for defect in defects:
+        new_det = defect.copy()
+        if "bbox" in defect:
+            new_det["bbox"] = restore_bbox_from_rotation(defect["bbox"], rotation_meta)
+        polygon = defect.get("polygon")
+        if polygon:
+            normalized = _normalize_polygon(polygon)
+            if normalized:
+                new_det["polygon"] = restore_polygon_from_rotation(normalized, rotation_meta)
+        restored.append(new_det)
+    return restored
+
+
 def resolve_label(class_id: int, label_map: Dict[int, str]) -> str:
     if class_id in label_map:
         return label_map[class_id]
@@ -209,18 +452,16 @@ def resolve_label(class_id: int, label_map: Dict[int, str]) -> str:
 
 
 def _draw_detection(canvas: np.ndarray,
-                    bbox: Sequence[float],
-                    label: str,
-                    score: float,
-                    class_id: int,
+                    detection: Dict[str, Any],
                     font_renderer: Optional[FontRenderer]):
     draw_detection_instance(
         canvas,
-        bbox=bbox,
-        label=label,
-        score=score,
-        class_id=class_id,
-        font_renderer=font_renderer
+        bbox=detection["bbox"],
+        label=detection["class_name"],
+        score=detection.get("confidence"),
+        class_id=detection.get("class_id", 0),
+        font_renderer=font_renderer,
+        polygon=detection.get("polygon")
     )
 
 
@@ -265,6 +506,55 @@ def _run_patch_detection(aligned_roi: np.ndarray,
     return _restore_detections_from_alignment(detections, rotation_meta)
 
 
+def _run_patch_segmentation(aligned_roi: np.ndarray,
+                            rotation_meta: Optional[Dict[str, Any]],
+                            secondary_model: RFDetrSegmentationModel,
+                            enhance_mode: str,
+                            window_size: Tuple[int, int],
+                            overlap: float,
+                            debug_dir: Optional[Path],
+                            font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
+    if secondary_model is None or window_size is None:
+        return []
+
+    stride = calculate_stride(window_size, overlap)
+    patches = sliding_window_crop(aligned_roi, window_size, stride)
+    roi_h, roi_w = aligned_roi.shape[:2]
+    detections: List[Dict[str, Any]] = []
+
+    for patch_idx, patch_info in enumerate(patches):
+        patch = patch_info['patch']
+        px, py = patch_info['position']
+        enhanced_patch = enhance_image(patch, mode=enhance_mode, output_bits=8)
+        prepared_patch = ensure_color(enhanced_patch)
+        defects, _ = secondary_model.infer(prepared_patch, rotation_meta=None,
+                                           visualize=False, font_renderer=None)
+        if debug_dir is not None:
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            out_path = debug_dir / f"patch_{patch_idx:03d}.jpg"
+            _save_debug_image(prepared_patch, defects, out_path, font_renderer)
+
+        for defect in defects:
+            bbox = defect.get("bbox")
+            if bbox is None or len(bbox) != 4:
+                continue
+            offset_bbox = [
+                float(np.clip(bbox[0] + px, 0, roi_w)),
+                float(np.clip(bbox[1] + py, 0, roi_h)),
+                float(np.clip(bbox[2] + px, 0, roi_w)),
+                float(np.clip(bbox[3] + py, 0, roi_h))
+            ]
+            new_defect = defect.copy()
+            new_defect["bbox"] = offset_bbox
+            polygon = defect.get("polygon")
+            if polygon:
+                new_defect["polygon"] = _offset_polygon(polygon, px, py, roi_w, roi_h)
+            new_defect["source"] = "patch"
+            detections.append(new_defect)
+
+    return _restore_segments_from_alignment(detections, rotation_meta)
+
+
 def _map_to_image(detections: List[Dict[str, Any]],
                   offset_x: int,
                   offset_y: int,
@@ -280,6 +570,8 @@ def _map_to_image(detections: List[Dict[str, Any]],
             float(np.clip(bbox[2] + offset_x, 0, img_w)),
             float(np.clip(bbox[3] + offset_y, 0, img_h))
         ]
+        polygon = det.get("polygon")
+        mapped_polygon = _offset_polygon(polygon, offset_x, offset_y, img_w, img_h) if polygon else None
         mapped_det = {
             "class_id": det["class_id"],
             "class_name": det["class_name"],
@@ -287,6 +579,8 @@ def _map_to_image(detections: List[Dict[str, Any]],
             "bbox": mapped_bbox,
             "source": det.get("source", source)
         }
+        if mapped_polygon:
+            mapped_det["polygon"] = mapped_polygon
         mapped.append(mapped_det)
     return mapped
 
@@ -329,6 +623,41 @@ def _bbox_iou(box_a: Sequence[float], box_b: Sequence[float]) -> float:
     return inter_area / union
 
 
+def _bbox_to_polygon(bbox: Sequence[float]) -> List[List[float]]:
+    if not bbox or len(bbox) != 4:
+        return []
+    x1, y1, x2, y2 = bbox
+    return [
+        [float(x1), float(y1)],
+        [float(x2), float(y1)],
+        [float(x2), float(y2)],
+        [float(x1), float(y2)]
+    ]
+
+
+def _mask_to_polygon(mask: np.ndarray, min_area: float = 10.0) -> List[List[float]]:
+    if mask is None:
+        return []
+    binary = (mask.astype(np.float32) > 0.5).astype(np.uint8)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return []
+    contour = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(contour) < min_area:
+        return []
+    epsilon = 0.01 * cv2.arcLength(contour, True)
+    approx = cv2.approxPolyDP(contour, epsilon, True)
+    pts = approx.reshape(-1, 2) if approx.size else np.zeros((0, 2), dtype=np.float32)
+    return _normalize_polygon(pts)
+
+
+def _restore_canvas_from_rotation(canvas: Optional[np.ndarray],
+                                  rotation_meta: Optional[Dict[str, Any]]) -> Optional[np.ndarray]:
+    if canvas is None or not rotation_meta or rotation_meta.get("rotation") != "ccw90":
+        return canvas
+    return cv2.rotate(canvas, cv2.ROTATE_90_CLOCKWISE)
+
+
 def _save_debug_image(image: np.ndarray,
                       detections: List[Dict[str, Any]],
                       out_path: Path,
@@ -338,8 +667,31 @@ def _save_debug_image(image: np.ndarray,
     else:
         debug_canvas = ensure_color(image.copy())
         for det in detections:
-            bbox = det["bbox"]
-            _draw_detection(debug_canvas, bbox, det.get("class_name", ""),
-                            det.get("confidence", 0.0), det.get("class_id", 0), font_renderer)
+            _draw_detection(debug_canvas, det, font_renderer)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), debug_canvas)
+
+
+def _offset_polygon(polygon: Sequence[Sequence[float]],
+                    offset_x: int,
+                    offset_y: int,
+                    img_w: int,
+                    img_h: int) -> List[List[float]]:
+    mapped: List[List[float]] = []
+    for pt in polygon:
+        if not isinstance(pt, (list, tuple, np.ndarray)) or len(pt) < 2:
+            continue
+        mapped.append([
+            float(np.clip(pt[0] + offset_x, 0, img_w)),
+            float(np.clip(pt[1] + offset_y, 0, img_h))
+        ])
+    return mapped
+
+
+def _normalize_polygon(points: Sequence[Sequence[float]]) -> List[List[float]]:
+    normalized: List[List[float]] = []
+    for pt in points:
+        if not isinstance(pt, (list, tuple, np.ndarray)) or len(pt) < 2:
+            continue
+        normalized.append([float(pt[0]), float(pt[1])])
+    return normalized

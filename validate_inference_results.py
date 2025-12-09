@@ -494,6 +494,24 @@ def plot_per_class_metrics(per_class_metrics: List[Dict[str, Any]],
     return output_path
 
 
+def _draw_polygon(canvas: np.ndarray,
+                  polygon: Sequence[Sequence[float]],
+                  color: Tuple[int, int, int],
+                  thickness: int = 2,
+                  alpha: float = 0.25) -> bool:
+    if not polygon or len(polygon) < 3:
+        return False
+    pts = np.array([
+        (int(round(pt[0])), int(round(pt[1])))
+        for pt in polygon
+    ], dtype=np.int32)
+    overlay = canvas.copy()
+    cv2.fillPoly(overlay, [pts], color)
+    cv2.addWeighted(overlay, alpha, canvas, 1 - alpha, 0, canvas)
+    cv2.polylines(canvas, [pts], True, color, thickness)
+    return True
+
+
 def draw_overlay(image: np.ndarray,
                  eval_data: Dict[str, Any],
                  font_renderer: FontRenderer) -> np.ndarray:
@@ -502,8 +520,13 @@ def draw_overlay(image: np.ndarray,
         bbox = pred["bbox"]
         status = pred.get("status", STATUS_FALSE)
         color = STATUS_COLORS.get(status, (255, 255, 255))
-        x1, y1, x2, y2 = [int(round(v)) for v in bbox]
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+        polygon = pred.get("polygon")
+        drew_polygon = _draw_polygon(canvas, polygon, color)
+        if not drew_polygon:
+            x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+        else:
+            x1, y1, x2, y2 = [int(round(v)) for v in bbox]
         label_parts = [status]
         cls_name = pred.get("class_name")
         if cls_name:
@@ -521,10 +544,12 @@ def draw_overlay(image: np.ndarray,
         if status == STATUS_MISSED:
             bbox = gt["bbox"]
             color = STATUS_COLORS.get(status, (0, 0, 255))
-            x1, y1, x2, y2 = [int(round(v)) for v in bbox]
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+            polygon = gt.get("polygon")
+            if not _draw_polygon(canvas, polygon, color, thickness=2, alpha=0.15):
+                x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
             label = f"标注:{gt.get('class_name', '')} {status}"
-            origin = (x1, min(canvas.shape[0] - 10, y2 - 5))
+            origin = (int(round(bbox[0])), min(canvas.shape[0] - 10, int(round(bbox[3])) - 5))
             font_renderer.draw(canvas, label, origin, color)
     return canvas
 

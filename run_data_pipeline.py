@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 import json
-from typing import List, Dict, Set
+from typing import List, Dict
 from collections import OrderedDict
 from pathlib import Path
 import platform
@@ -13,87 +13,32 @@ from tqdm import tqdm
 import shutil
 import argparse
 import copy
+import yaml
 
-# ========================= 配置区域 =========================
-# 根据操作系统自动选择路径
-if platform.system() == "Windows":
-    BASE_PATH = r"C:\Users\CHT\Desktop\datasets1117\labeled"
-    JSON_BASE_PATH = r"C:\Users\CHT\Desktop\datasets1117\adjust"
-    MODEL_PATH = "E:\CODE\weldDataProcess\model\weldDetect.pt"
-elif platform.system() == "Linux":
-    BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/labeled"
-    JSON_BASE_PATH = "/home/lenovo/code/CHT/datasets/Xray/self/1120/adjust"  # 修复引号缺失问题
-    MODEL_PATH = "./model/weldROI2.pt"  #增加旋转的模型
-else:
-    # 其他系统（如macOS）可根据需要添加配置，这里抛出异常提醒
-    raise EnvironmentError(
-        f"不支持的操作系统：{platform.system()}\n"
-        "请在配置区域添加对应系统的路径配置"
-    )
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_CONFIG_PATH = os.path.join(CURRENT_DIR, "configs", "pipeline_profiles.yaml")
 
-DATASETS = [
-    "D1",
-    "D2",
-    "D3",
-    "D4",
-    "img20250608",
-    "img20250609"
-]
-OUTPUT_BASE_DIR = "roi2_unify"
-OUTPUT_CONFIG = {
-    "yolo_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"yolo"),
-    "roi_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR,"ROI"),
-    "roi_rotate": os.path.join(BASE_PATH, OUTPUT_BASE_DIR, "ROI_rotate"),
-    "patch_dir": os.path.join(BASE_PATH,OUTPUT_BASE_DIR, "patch"),
-    "cls_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR, "det")
-}
-FIXED_PARAMS = {
-    "labelme2yolo": {
-        "seg": True,
-        "unify_to_crack": True,  # 如果为True，所有标签都会被统一为crack
-        "script_path": "convert/labelme2yolo.py"
-    },
-    "yolo_roi_extractor": {
-        "model_path": MODEL_PATH,
-        "roi_conf": 0.25,
-        "roi_iou": 0.45,
-        "padding": 0.1,
-        "mode": "seg",
-        "script_path": "convert/pj/yolo_roi_extractor.py"
-    },
-    "rotate_yolo": {
-        "script_path": "convert/pj/rotateYOLOdate.py"
-    },
-    "patchandenhance": {
-        "overlap": 0.7,
-        "enhance_mode": "windowing",
-        "no_slice":True,
-        "window_size": [640, 640],
-        "label_mode": "seg",
-        "script_path": "convert/pj/patchandenhance.py"
-    },
-    "seg2det":{
-        "mode": "det",
-        "script_path": "convert/pj/seg2det.py",
-        "balance_data": True
-    }
-}
-
-PARAM_LOG_PATH = os.path.join(BASE_PATH, OUTPUT_BASE_DIR, "pipeline_params.json")
-PARAM_LOG = {
-    "base_path": BASE_PATH,
-    "json_base_path": JSON_BASE_PATH,
-    "datasets": list(DATASETS),
-    "output_base_dir": os.path.join(BASE_PATH, OUTPUT_BASE_DIR),
-    "selected_steps": [],
-    "commands": []
-}
+CONFIG_PATH = DEFAULT_CONFIG_PATH
+ACTIVE_PROFILE_NAME = None
+BASE_PATH = ""
+JSON_BASE_PATH = ""
+OUTPUT_BASE_DIR = ""
+REFERENCE_LABEL_MAP_PATH = ""
+DATASETS: List[str] = []
+OUTPUT_CONFIG: Dict[str, str] = {}
+FIXED_PARAMS: Dict[str, Dict] = {}
+PARAM_LOG_PATH = ""
+PARAM_LOG: Dict = {}
 
 def _ensure_log_dir():
+    if not PARAM_LOG_PATH:
+        return
     os.makedirs(os.path.dirname(PARAM_LOG_PATH), exist_ok=True)
 
 def save_param_log():
     """持久化流水线参数记录"""
+    if not PARAM_LOG_PATH:
+        return
     _ensure_log_dir()
     with open(PARAM_LOG_PATH, 'w', encoding='utf-8') as f:
         json.dump(PARAM_LOG, f, ensure_ascii=False, indent=2)
@@ -155,6 +100,144 @@ STEP_INFO = {
     }
 }
 
+def resolve_path(path_value: str, base_dir: str = None) -> str:
+    """将路径解析为绝对路径，必要时相对 base_dir."""
+    if path_value is None:
+        return None
+
+    expanded = os.path.expanduser(str(path_value))
+    if os.path.isabs(expanded):
+        return os.path.abspath(expanded)
+
+    if base_dir:
+        return os.path.abspath(os.path.join(base_dir, expanded))
+
+    return os.path.abspath(expanded)
+
+
+def load_pipeline_profile(config_path: str, requested_profile: str = None) -> str:
+    """读取配置文件并应用指定 profile."""
+    config_path = resolve_path(config_path or DEFAULT_CONFIG_PATH)
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"配置文件不存在：{config_path}")
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config_data = yaml.safe_load(f) or {}
+
+    if not isinstance(config_data, dict):
+        raise ValueError("配置文件格式错误，期望为字典结构")
+
+    profiles = config_data.get("profiles")
+    if not isinstance(profiles, dict) or not profiles:
+        raise ValueError("配置文件缺少 profiles 定义")
+
+    profile_name = requested_profile or config_data.get("default_profile")
+    if not profile_name:
+        current_platform = platform.system()
+        for name, profile_data in profiles.items():
+            if profile_data.get("platform") == current_platform:
+                profile_name = name
+                break
+
+    if not profile_name:
+        profile_name = next(iter(profiles.keys()))
+
+    if profile_name not in profiles:
+        raise KeyError(f"配置文件中不存在 profile: {profile_name}")
+
+    apply_profile(config_path, profile_name, profiles[profile_name])
+    return profile_name
+
+
+def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
+    """根据 profile 设置全局路径和参数."""
+    global CONFIG_PATH, ACTIVE_PROFILE_NAME, BASE_PATH, JSON_BASE_PATH
+    global OUTPUT_BASE_DIR, DATASETS, OUTPUT_CONFIG, FIXED_PARAMS
+    global PARAM_LOG_PATH, PARAM_LOG
+    global REFERENCE_LABEL_MAP_PATH
+
+    paths_section = profile_data.get("paths") or {}
+    base_path_raw = paths_section.get("base_path")
+    if not base_path_raw:
+        raise ValueError(f"profile {profile_name} 缺少 paths.base_path")
+    json_base_raw = paths_section.get("json_base_path")
+    if not json_base_raw:
+        raise ValueError(f"profile {profile_name} 缺少 paths.json_base_path")
+
+    output_base_raw = paths_section.get("output_base_dir") or "pipeline_outputs"
+    labelme_params = (profile_data.get("params") or {}).get("labelme2yolo", {})
+    reference_label_map_raw = paths_section.get("reference_label_map_path")
+    if not reference_label_map_raw and not labelme_params.get("unify_to_crack"):
+        raise ValueError(f"profile {profile_name} 缺少 paths.reference_label_map_path")
+
+    CONFIG_PATH = config_path
+    ACTIVE_PROFILE_NAME = profile_name
+    BASE_PATH = resolve_path(base_path_raw)
+    JSON_BASE_PATH = resolve_path(json_base_raw)
+    OUTPUT_BASE_DIR = resolve_path(output_base_raw, BASE_PATH)
+    REFERENCE_LABEL_MAP_PATH = resolve_path(reference_label_map_raw, BASE_PATH) if reference_label_map_raw else ""
+
+    datasets = profile_data.get("datasets") or []
+    if not isinstance(datasets, list):
+        raise ValueError(f"profile {profile_name} 的 datasets 必须是列表")
+    DATASETS = list(datasets)
+
+    outputs_section = profile_data.get("outputs") or {}
+    if not isinstance(outputs_section, dict) or not outputs_section:
+        raise ValueError(f"profile {profile_name} 缺少 outputs 定义")
+    resolved_outputs: Dict[str, str] = {}
+    for key, value in outputs_section.items():
+        if value is None:
+            raise ValueError(f"profile {profile_name} 中 outputs.{key} 为空")
+        resolved_outputs[key] = resolve_path(value, OUTPUT_BASE_DIR)
+    OUTPUT_CONFIG = resolved_outputs
+
+    FIXED_PARAMS = copy.deepcopy(profile_data.get("params") or {})
+
+    param_log_raw = profile_data.get("param_log_path")
+    PARAM_LOG_PATH = resolve_path(param_log_raw, OUTPUT_BASE_DIR) if param_log_raw else os.path.join(OUTPUT_BASE_DIR, "pipeline_params.json")
+
+    required_outputs = {info["output"] for info in STEP_INFO.values() if info.get("output")}
+    missing_outputs = sorted(key for key in required_outputs if key not in OUTPUT_CONFIG)
+    if missing_outputs:
+        raise ValueError(f"profile {profile_name} 缺少以下输出目录配置：{', '.join(missing_outputs)}")
+
+    PARAM_LOG = {
+        "config_path": CONFIG_PATH,
+        "config_profile": ACTIVE_PROFILE_NAME,
+        "base_path": BASE_PATH,
+        "json_base_path": JSON_BASE_PATH,
+        "reference_label_map_path": REFERENCE_LABEL_MAP_PATH,
+        "datasets": list(DATASETS),
+        "output_base_dir": OUTPUT_BASE_DIR,
+        "selected_steps": [],
+        "commands": []
+    }
+
+# ===========================================================================
+
+def load_label_map_from_yaml(yaml_path: str) -> OrderedDict:
+    """从 dataset.yaml 读取 label_id_map。"""
+    if not yaml_path:
+        raise ValueError("缺少参考 dataset.yaml 路径")
+
+    yaml_file = Path(yaml_path)
+    if not yaml_file.exists():
+        raise FileNotFoundError(f"参考 dataset.yaml 不存在: {yaml_file}")
+
+    try:
+        with yaml_file.open("r", encoding="utf-8") as f:
+            yaml_data = yaml.safe_load(f)
+    except yaml.YAMLError as err:
+        raise RuntimeError(f"解析 {yaml_file} 失败: {err}") from err
+
+    label_map_raw = yaml_data.get("label_id_map") if yaml_data else None
+    if not isinstance(label_map_raw, dict):
+        raise ValueError(f"{yaml_file} 缺少有效的 label_id_map")
+
+    ordered_pairs = sorted(label_map_raw.items(), key=lambda item: item[1])
+    return OrderedDict(ordered_pairs)
+
 # ===========================================================================
 
 def parse_arguments():
@@ -191,6 +274,20 @@ def parse_arguments():
         action='store_true',
         help='强制执行步骤，即使前置依赖的输出目录不存在'
     )
+
+    parser.add_argument(
+        '--config-path',
+        type=str,
+        default=DEFAULT_CONFIG_PATH,
+        help=f'配置文件路径 (默认: {DEFAULT_CONFIG_PATH})'
+    )
+
+    parser.add_argument(
+        '--profile',
+        type=str,
+        default=None,
+        help='配置文件中要使用的 profile 名称（默认使用 default_profile 或操作系统匹配项）'
+    )
     
     return parser.parse_args()
 
@@ -213,7 +310,8 @@ def validate_steps(steps_str: str) -> List[str]:
     return steps
 
 def collect_all_labels(datasets: List[str], json_base_path: str,
-                       unify_to_crack: bool = False) -> OrderedDict:
+                       unify_to_crack: bool = False,
+                       reference_label_map_path: str = None) -> OrderedDict:
     """
     收集所有数据集的标签，建立统一的标签映射
     """
@@ -222,6 +320,14 @@ def collect_all_labels(datasets: List[str], json_base_path: str,
         print("\n📊 启用了 unify_to_crack，所有标签将统一为 'crack'")
         label_map = OrderedDict([('crack', 0)])
         print(f"📋 统一标签映射：{dict(label_map)}")
+        return label_map
+
+    if reference_label_map_path:
+        print("\n📊 从参考 dataset.yaml 读取标签映射...")
+        label_map = load_label_map_from_yaml(reference_label_map_path)
+        print(f"📋 引用 {reference_label_map_path} 中的 label_id_map：")
+        for label, idx in label_map.items():
+            print(f"  {idx}: {label}")
         return label_map
 
     print("\n📊 收集所有数据集的标签...")
@@ -308,7 +414,12 @@ def process_labelme2yolo_unified(datasets: List[str], base_path: str,
         print("\n⚠️ 注意：已启用 unify_to_crack，所有标签将被统一为 'crack'")
 
     # 第一步：收集所有标签，建立统一映射
-    label_map = collect_all_labels(DATASETS, JSON_BASE_PATH, unify_to_crack)
+    label_map = collect_all_labels(
+        datasets,
+        json_base_path,
+        unify_to_crack,
+        REFERENCE_LABEL_MAP_PATH
+    )
 
     if not label_map:
         print("❌ 错误：未找到任何标签！")
@@ -501,8 +612,16 @@ def step5_seg2det():
 def main():
     # 解析命令行参数
     args = parse_arguments()
+
+    try:
+        active_profile = load_pipeline_profile(args.config_path, args.profile)
+    except Exception as exc:
+        print(f"❌ 配置加载失败：{exc}")
+        sys.exit(1)
     
     print("🚀 数据处理流水线启动（可控版本）！")
+    print(f"配置文件：{CONFIG_PATH}")
+    print(f"使用的profile：{active_profile}")
     print(f"基础路径：{BASE_PATH}")
     print(f"待处理数据集：{DATASETS}")
     
