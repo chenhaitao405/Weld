@@ -16,7 +16,7 @@ training_args = {
     "output_dir": "./runs/1208/detrlarge/SWRD_patch640_res560_continue",
     "early_stopping": True,
     "run":"4batch",
-    "resume" : "train/runs/1208/detrlarge/SWRD_patch640_res560/checkpoint_best_regular.pth",
+    "resume" : "runs/1208/detrlarge/SWRD_patch640_res560/checkpoint_best_regular.pth",
     # "resolution": 1120
 }
 
