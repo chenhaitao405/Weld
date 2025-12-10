@@ -8,16 +8,17 @@ from rfdetr import RFDETRBase, RFDETRLarge, RFDETRSegPreview
 model = RFDETRLarge()
 
 training_args = {
-    "dataset_dir": "/datasets/PAR/Xray/opensource/SWRD8bit/swr_pipeline/patch_det_coco",
+    "dataset_dir": "/datasets/PAR/Xray/self/1120/labeled/roi2_merge/ROI_rotate_slice3_det_coco",
     "epochs": 500,
-    "batch_size": 2,
+    "batch_size": 1,
     "grad_accum_steps": 8,
     "lr": 1e-4,
-    "output_dir": "./runs/1208/detrlarge/SWRD_patch640_res560_continue",
+    "output_dir": "./runs/1208/detrlarge/slice3_res1120",
     "early_stopping": True,
     "run":"4batch",
-    "resume" : "runs/1208/detrlarge/SWRD_patch640_res560/checkpoint_best_regular.pth",
-    # "resolution": 1120
+    # "resume" : "runs/1208/detrlarge/SWRD_patch640_res560/checkpoint_best_regular.pth",
+    "resolution":1120
+
 }
 
 output_dir = Path(training_args["output_dir"]).resolve()
@@ -78,8 +79,8 @@ with _log_terminal_output(log_file_path):
         output_dir=str(output_dir),
         early_stopping=training_args["early_stopping"],
         run = training_args["run"],
-        # resolution = training_args["resolution"]
-        resume = training_args["resume"],
+        resolution = training_args["resolution"]
+        # resume = training_args["resume"],
     )
 
     config_path = output_dir / "train_params.json"

@@ -39,7 +39,7 @@ profiles:
       patchandenhance:
         overlap: 0.7
         enhance_mode: windowing
-        no_slice: false
+        slice_mode: 2
         window_size: [640, 640]
         label_mode: seg
         script_path: convert/pj/patchandenhance.py
@@ -71,7 +71,7 @@ profiles:
     outputs:
       yolo_dir: yolo
       roi_dir: ROI_1205
-      roi_rotate: ROI_rotate
+      roi_rotate: ROI_rotate_1205
       patch_dir: patch_
       cls_dir: patch_det
     params:
@@ -91,7 +91,7 @@ profiles:
       patchandenhance:
         overlap: 0.5
         enhance_mode: windowing
-        no_slice: false
+        slice_mode: 2
         window_size: [640, 640]
         label_mode: seg
         script_path: convert/pj/patchandenhance.py
@@ -134,7 +134,7 @@ profiles:
       patchandenhance:
         overlap: 0.5
         enhance_mode: windowing
-        no_slice: true
+        slice_mode: 1
         window_size: [640, 640]
         label_mode: seg
         script_path: convert/pj/patchandenhance.py

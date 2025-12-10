@@ -515,20 +515,28 @@ def process_rotate_yolo(input_dir: str, output_dir: str):
 def process_patch_enhance(input_dir: str, output_dir: str):
     """执行图像裁剪增强"""
     script_path = get_abs_path(FIXED_PARAMS["patchandenhance"]["script_path"])
+    patch_cfg = FIXED_PARAMS["patchandenhance"]
+    slice_mode = patch_cfg.get("slice_mode")
+    if slice_mode is None:
+        slice_mode = 1 if patch_cfg.get("no_slice") else 2
+
     command = [
         sys.executable, script_path,
         "--input_dir", input_dir,
         "--output_dir", output_dir,
-        "--overlap", str(FIXED_PARAMS["patchandenhance"]["overlap"]),
-        "--enhance_mode", FIXED_PARAMS["patchandenhance"]["enhance_mode"],
-        "--window_size",
-        str(FIXED_PARAMS["patchandenhance"]["window_size"][0]),
-        str(FIXED_PARAMS["patchandenhance"]["window_size"][1]),
-        "--label_mode", FIXED_PARAMS["patchandenhance"]["label_mode"]
+        "--enhance_mode", patch_cfg["enhance_mode"],
+        "--label_mode", patch_cfg["label_mode"]
     ]
 
-    if FIXED_PARAMS["patchandenhance"]["no_slice"]:
-        command.append("--no_slice")
+    if slice_mode == 2:
+        command.extend([
+            "--overlap", str(patch_cfg["overlap"]),
+            "--window_size",
+            str(patch_cfg["window_size"][0]),
+            str(patch_cfg["window_size"][1])
+        ])
+
+    command.extend(["--slice_mode", str(slice_mode)])
 
     run_command(command, "图像裁剪与增强", param_key="patchandenhance")
 
