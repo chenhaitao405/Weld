@@ -163,6 +163,8 @@ def parse_args() -> argparse.Namespace:
                         help="切片检测窗口重叠率 (0-1)")
     parser.add_argument("--det-fusion-iou", type=float, default=0.5,
                         help="主干/切片分支NMS融合IoU阈值")
+    parser.add_argument("--det-wide-slice", action="store_true",
+                        help="启用横切纵拼推理（仅det模式），结果与主干/切片一起融合")
 
     return parser.parse_args()
 
@@ -275,6 +277,7 @@ class InferencePipelineRunner:
         self.patch_window = _resolve_patch_window(args)
         self.patch_overlap = _resolve_patch_overlap(args)
         self.fusion_iou = _resolve_fusion_iou(args)
+        self.enable_wide_slice = bool(getattr(args, "det_wide_slice", False))
 
         self.primary_model = self._build_primary_model()
         self.secondary_model = self._build_secondary_model()
@@ -411,6 +414,10 @@ class InferencePipelineRunner:
         debug_dir = self._image_debug_dir(image_path)
 
         if self.mode == "det":
+            wide_slice_cfg = None
+            if self.enable_wide_slice:
+                wide_slice_cfg = rfdet_pipeline.WideSliceConfig(enabled=True)
+
             config = self.detection_config_cls(
                 roi_detector=self.roi_detector,
                 detection_model=self.primary_model,
@@ -422,7 +429,8 @@ class InferencePipelineRunner:
                 visualize=self.visualize,
                 visualization_dir=self.visualization_dir if self.visualize else None,
                 font_renderer=self.font_renderer,
-                debug_root=debug_dir
+                debug_root=debug_dir,
+                wide_slice=wide_slice_cfg
             )
             rois, vis_path = self.run_detection_func(image, image_path, config)
         else:

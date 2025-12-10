@@ -115,8 +115,8 @@ profiles:
       yolo_dir: yolo
       roi_dir: ROI_jpg
       roi_rotate: ROI_rotate
-      patch_dir: patch_noslice
-      cls_dir: patch_det
+      patch_dir: patch_slice3
+      cls_dir: patch_det_slice3
     params:
       labelme2yolo:
         seg: true
@@ -134,7 +134,7 @@ profiles:
       patchandenhance:
         overlap: 0.5
         enhance_mode: windowing
-        slice_mode: 1
+        slice_mode: 3
         window_size: [640, 640]
         label_mode: seg
         script_path: convert/pj/patchandenhance.py

@@ -305,6 +305,16 @@ class RFDetrDetectionConfig:
     visualization_dir: Optional[Path] = None
     font_renderer: Optional[FontRenderer] = None
     debug_root: Optional[Path] = None
+    wide_slice: Optional["WideSliceConfig"] = None
+
+
+@dataclass
+class WideSliceConfig:
+    enabled: bool = False
+    aspect_ratio_threshold: float = 4.0
+    window_ratio: float = 2.0
+    overlap: float = 0.3
+    target_size: int = 1120
 
 
 def run_rfdet_detection(image: np.ndarray,
@@ -323,7 +333,8 @@ def run_rfdet_detection(image: np.ndarray,
         visualize=config.visualize,
         visualization_dir=config.visualization_dir,
         font_renderer=config.font_renderer,
-        debug_dir=config.debug_root
+        debug_dir=config.debug_root,
+        wide_slice=config.wide_slice
     )
 
 
@@ -340,7 +351,8 @@ def _process_roi_and_detection(
         visualize: bool,
         visualization_dir: Optional[Path],
         font_renderer: Optional[FontRenderer],
-        debug_dir: Optional[Path]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        debug_dir: Optional[Path],
+        wide_slice: Optional[WideSliceConfig] = None) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     img_h, img_w = image.shape[:2]
     roi_boxes = roi_detector.detect_with_padding(image) if roi_detector else []
     if not roi_boxes:
@@ -381,8 +393,22 @@ def _process_roi_and_detection(
             )
             secondary_mapped = _map_to_image(patch_detections, x1_i, y1_i, img_w, img_h, source="patch")
 
-        merged_detections = mapped_detections + secondary_mapped
-        if secondary_mapped:
+        wide_slice_mapped: List[Dict[str, Any]] = []
+        if wide_slice and wide_slice.enabled:
+            wide_debug_dir = (roi_debug_dir / "wideslice") if roi_debug_dir else None
+            extra_detections = _run_wide_slice_detection(
+                prepared_roi=prepared_roi,
+                detection_model=detection_model,
+                slice_cfg=wide_slice,
+                debug_dir=wide_debug_dir,
+                font_renderer=font_renderer
+            )
+            if extra_detections:
+                restored_extra = _restore_detections_from_alignment(extra_detections, rotation_meta)
+                wide_slice_mapped = _map_to_image(restored_extra, x1_i, y1_i, img_w, img_h, source="wide_slice")
+
+        merged_detections = mapped_detections + secondary_mapped + wide_slice_mapped
+        if secondary_mapped or wide_slice_mapped:
             merged_detections = _apply_classwise_nms(merged_detections, fusion_iou)
 
         if vis_image is not None:
@@ -395,9 +421,12 @@ def _process_roi_and_detection(
             "num_detections": len(merged_detections),
             "detections": merged_detections
         }
-        if secondary_mapped:
+        if secondary_mapped or wide_slice_mapped:
             roi_payload["primary_detections"] = len(mapped_detections)
+        if secondary_mapped:
             roi_payload["secondary_detections"] = len(secondary_mapped)
+        if wide_slice_mapped:
+            roi_payload["wide_slice_detections"] = len(wide_slice_mapped)
         roi_results.append(roi_payload)
 
     vis_path = None
@@ -504,6 +533,211 @@ def _run_patch_detection(aligned_roi: np.ndarray,
             detections.append(new_det)
 
     return _restore_detections_from_alignment(detections, rotation_meta)
+
+
+def _run_wide_slice_detection(prepared_roi: np.ndarray,
+                              detection_model: RFDetrDetectionModel,
+                              slice_cfg: WideSliceConfig,
+                              debug_dir: Optional[Path],
+                              font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
+    roi_h, roi_w = prepared_roi.shape[:2]
+    if roi_h == 0 or roi_w == 0 or not slice_cfg.enabled:
+        return []
+
+    aspect_ratio = roi_w / max(1, roi_h)
+    target_size = max(1, int(slice_cfg.target_size))
+    detections: List[Dict[str, Any]] = []
+
+    slice_idx = 0
+
+    if aspect_ratio < slice_cfg.aspect_ratio_threshold:
+        detections.extend(
+            _detect_resized_slice(
+                patch=prepared_roi,
+                detection_model=detection_model,
+                target_size=target_size,
+                orig_width=roi_w,
+                orig_height=roi_h,
+                x_offset=0.0,
+                slice_index=slice_idx,
+                debug_dir=debug_dir,
+                font_renderer=font_renderer
+            )
+        )
+        slice_idx += 1
+        return detections
+
+    window_w = max(1, int(round(roi_h * slice_cfg.window_ratio)))
+    window_w = min(window_w, roi_w)
+    stride = max(1, int(round(window_w * (1 - slice_cfg.overlap))))
+
+    patches: List[Dict[str, Any]] = []
+    start_x = 0
+    while start_x < roi_w:
+        end_x = min(start_x + window_w, roi_w)
+        crop = prepared_roi[:, start_x:end_x].copy()
+        width = end_x - start_x
+        patches.append({
+            "image": crop,
+            "x": float(start_x),
+            "width": float(width),
+            "is_full": width == window_w
+        })
+        if end_x >= roi_w:
+            break
+        start_x += stride
+
+    pending_full: Optional[Dict[str, Any]] = None
+    for patch in patches:
+        if patch["is_full"]:
+            if pending_full is None:
+                pending_full = patch
+            else:
+                detections.extend(
+                    _detect_wide_pair_slice(
+                        top_patch=pending_full,
+                        bottom_patch=patch,
+                        detection_model=detection_model,
+                        target_size=target_size,
+                        roi_height=roi_h,
+                        roi_width=roi_w,
+                        slice_index=slice_idx,
+                        debug_dir=debug_dir,
+                        font_renderer=font_renderer
+                    )
+                )
+                slice_idx += 1
+                pending_full = None
+        else:
+            detections.extend(
+                _detect_resized_slice(
+                    patch=patch["image"],
+                    detection_model=detection_model,
+                    target_size=target_size,
+                    orig_width=int(patch["width"]),
+                    orig_height=roi_h,
+                    x_offset=patch["x"],
+                    slice_index=slice_idx,
+                    debug_dir=debug_dir,
+                    font_renderer=font_renderer
+                )
+            )
+            slice_idx += 1
+
+    if pending_full is not None:
+        detections.extend(
+            _detect_resized_slice(
+                patch=pending_full["image"],
+                detection_model=detection_model,
+                target_size=target_size,
+                orig_width=int(pending_full["width"]),
+                orig_height=roi_h,
+                x_offset=pending_full["x"],
+                slice_index=slice_idx,
+                debug_dir=debug_dir,
+                font_renderer=font_renderer
+            )
+        )
+        slice_idx += 1
+
+    return detections
+
+
+def _detect_resized_slice(patch: np.ndarray,
+                          detection_model: RFDetrDetectionModel,
+                          target_size: int,
+                          orig_width: int,
+                          orig_height: int,
+                          x_offset: float,
+                          slice_index: int,
+                          debug_dir: Optional[Path],
+                          font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
+    if orig_width <= 0 or orig_height <= 0:
+        return []
+    resized = cv2.resize(patch, (target_size, target_size), interpolation=cv2.INTER_AREA)
+    prepared = ensure_color(resized)
+    raw = detection_model.predict_patch(prepared)
+    if not raw:
+        return []
+    scale_x = orig_width / target_size
+    scale_y = orig_height / target_size
+    detections: List[Dict[str, Any]] = []
+    if debug_dir is not None:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        det_path = debug_dir / f"wideslice_{slice_index:04d}_det.jpg"
+        _save_debug_image(prepared, raw, det_path, font_renderer)
+
+    for det in raw:
+        bbox = det["bbox"]
+        new_det = det.copy()
+        new_det["bbox"] = [
+            float(bbox[0] * scale_x + x_offset),
+            float(bbox[1] * scale_y),
+            float(bbox[2] * scale_x + x_offset),
+            float(bbox[3] * scale_y)
+        ]
+        new_det["source"] = "wide_slice"
+        detections.append(new_det)
+    return detections
+
+
+def _detect_wide_pair_slice(top_patch: Dict[str, Any],
+                            bottom_patch: Dict[str, Any],
+                            detection_model: RFDetrDetectionModel,
+                            target_size: int,
+                            roi_height: int,
+                            roi_width: int,
+                            slice_index: int,
+                            debug_dir: Optional[Path],
+                            font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
+    top_img = top_patch["image"]
+    bottom_img = bottom_patch["image"]
+    if top_img.shape[1] != bottom_img.shape[1]:
+        min_w = min(top_img.shape[1], bottom_img.shape[1])
+        top_img = top_img[:, :min_w]
+        bottom_img = bottom_img[:, :min_w]
+    stacked = np.vstack([top_img, bottom_img])
+    resized = cv2.resize(stacked, (target_size, target_size), interpolation=cv2.INTER_AREA)
+    prepared = ensure_color(resized)
+    raw = detection_model.predict_patch(prepared)
+    if not raw:
+        return []
+
+    if debug_dir is not None:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        det_path = debug_dir / f"wideslice_{slice_index:04d}_det.jpg"
+        _save_debug_image(prepared, raw, det_path, font_renderer)
+
+    window_w = top_img.shape[1]
+    scale_x = window_w / target_size
+    scale_y = (2 * roi_height) / target_size
+    detections: List[Dict[str, Any]] = []
+    for det in raw:
+        bbox = det["bbox"]
+        x1 = bbox[0] * scale_x
+        y1 = bbox[1] * scale_y
+        x2 = bbox[2] * scale_x
+        y2 = bbox[3] * scale_y
+        center_y = (y1 + y2) / 2.0
+        if center_y < roi_height:
+            x_offset = top_patch["x"]
+            local_y1 = y1
+            local_y2 = y2
+        else:
+            x_offset = bottom_patch["x"]
+            local_y1 = y1 - roi_height
+            local_y2 = y2 - roi_height
+        mapped_bbox = [
+            float(np.clip(x1 + x_offset, 0, roi_width)),
+            float(np.clip(local_y1, 0, roi_height)),
+            float(np.clip(x2 + x_offset, 0, roi_width)),
+            float(np.clip(local_y2, 0, roi_height))
+        ]
+        new_det = det.copy()
+        new_det["bbox"] = mapped_bbox
+        new_det["source"] = "wide_slice"
+        detections.append(new_det)
+    return detections
 
 
 def _run_patch_segmentation(aligned_roi: np.ndarray,
