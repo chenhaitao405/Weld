@@ -97,8 +97,10 @@ def parse_args() -> argparse.Namespace:
                         help="结果JSON文件名（相对output_dir）")
     parser.add_argument("--mode", choices=["seg", "det"], default="seg",
                         help="推理模式：seg=分割，det=RF-DETR检测")
-    parser.add_argument("--visualize", action="store_true", help="是否保存可视化结果")
-    parser.add_argument("--visualize-dir", help="可视化输出目录（默认在output_dir下）")
+    parser.add_argument("--visualize", action="store_true",
+                        help="是否保存可视化结果（已弃用，无实际效果）")
+    parser.add_argument("--visualize-dir",
+                        help="自定义可视化输出目录（已弃用）")
     parser.add_argument("--max-images", type=int, help="最多处理的图像数")
 
     # ROI配置
@@ -460,7 +462,7 @@ def main():
     image_dir = Path(args.image_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    visualization_dir = Path(args.visualize_dir) if args.visualize_dir else (output_dir / "visualizations")
+    visualization_dir = None
 
     image_paths = collect_images(image_dir, args.max_images)
     roi_detector = build_roi_detector(args)
@@ -477,7 +479,7 @@ def main():
     runner = InferencePipelineRunner(
         args=args,
         roi_detector=roi_detector,
-        visualization_dir=visualization_dir,
+        visualization_dir=None,
         font_renderer=font_renderer,
         debug_root=debug_root
     )
@@ -493,7 +495,7 @@ def main():
     print(f"\n推理完成: 模式={args.mode}，共处理 {len(results)} 张图像。")
     print(f"结果JSON: {results_path}")
     if args.visualize:
-        print(f"可视化输出目录: {visualization_dir}")
+        print("可视化输出已禁用：--visualize 参数不再产出图像")
 
 
 if __name__ == "__main__":

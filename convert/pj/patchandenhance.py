@@ -3,7 +3,7 @@ import sys
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from tqdm import tqdm
 import random
 import shutil
@@ -39,6 +39,14 @@ from utils import (
 from utils.constants import (
     DEFAULT_OVERLAP_RATIO, DEFAULT_WINDOW_SIZE,
     DEFAULT_JPEG_QUALITY, MIN_BBOX_RATIO, MIN_POLYGON_AREA_RATIO
+)
+from utils.wide_slice_utils import (
+    WideSliceParams,
+    WideSlicePatch,
+    WideSlicePlan,
+    build_wide_slice_plan,
+    resize_slice_to_square,
+    stack_wide_slice_pair
 )
 
 
@@ -232,7 +240,7 @@ class YOLOSlidingWindowProcessor:
                             output_image_dir: str, output_label_dir: str,
                             name: str) -> Dict[str, int]:
         """辅助函数：保存模式3生成的图像和标签"""
-        resized = cv2.resize(image, (MODE3_TARGET_SIZE, MODE3_TARGET_SIZE), interpolation=cv2.INTER_AREA)
+        resized = resize_slice_to_square(image, MODE3_TARGET_SIZE)
         image_save_path = Path(output_image_dir) / f"{name}.jpg"
         label_save_path = Path(output_label_dir) / f"{name}.txt"
 
@@ -250,37 +258,34 @@ class YOLOSlidingWindowProcessor:
         return stats
 
     def _generate_mode3_patches(self, image: np.ndarray, labels: List[List[float]],
-                                original_w: int, original_h: int) -> List[Dict]:
-        """按照模式3要求沿宽度滑动裁剪"""
-        window_w = max(1, int(round(original_h * MODE3_WINDOW_RATIO)))
-        stride = max(1, int(round(window_w * (1 - MODE3_OVERLAP))))
+                                original_w: int, original_h: int) -> Tuple[WideSlicePlan, List[Dict[str, Any]]]:
+        """按照模式3要求沿宽度滑动裁剪，并调整对应的标签"""
+        params = WideSliceParams(
+            aspect_ratio_threshold=MODE3_ASPECT_THRESHOLD,
+            window_ratio=MODE3_WINDOW_RATIO,
+            overlap=MODE3_OVERLAP,
+            target_size=MODE3_TARGET_SIZE
+        )
+        plan: WideSlicePlan = build_wide_slice_plan(image, params)
+        patch_entries: List[Dict[str, Any]] = []
 
-        patches: List[Dict] = []
-        start_x = 0
-        while start_x < original_w:
-            end_x = min(start_x + window_w, original_w)
-            crop_w = end_x - start_x
-            if crop_w <= 0:
-                break
-
-            crop_img = image[:, start_x:end_x].copy()
+        for patch in plan.patches:
+            crop_x = int(round(patch.x_offset))
             adjusted_labels = self.adjust_yolo_labels_for_crop(
-                labels, start_x, 0, crop_w, original_h, original_w, original_h
+                labels,
+                crop_x,
+                0,
+                patch.width,
+                patch.height,
+                original_w,
+                original_h
             )
-
-            patches.append({
-                'image': crop_img,
-                'labels': adjusted_labels,
-                'width': crop_w,
-                'height': original_h,
-                'is_full': crop_w == window_w
+            patch_entries.append({
+                'patch': patch,
+                'labels': adjusted_labels
             })
 
-            if end_x >= original_w:
-                break
-            start_x += stride
-
-        return patches
+        return plan, patch_entries
 
     def _merge_labels_for_vertical_stack(self,
                                          top_labels: List[List[float]],
@@ -344,21 +349,14 @@ class YOLOSlidingWindowProcessor:
         if h == 0 or w == 0:
             return {'processed': 0, 'with_defects': 0, 'without_defects': 0}
 
-        aspect_ratio = w / max(1, h)
         base_name = Path(image_path).stem
         stats = {'processed': 0, 'with_defects': 0, 'without_defects': 0}
 
-        if aspect_ratio < MODE3_ASPECT_THRESHOLD:
-            output_name = f"{base_name}_sq1120"
-            result = self._save_mode3_output(
-                enhanced_image, labels, output_image_dir, output_label_dir, output_name
-            )
-            for key in stats:
-                stats[key] += result[key]
+        plan, patches = self._generate_mode3_patches(enhanced_image, labels, w, h)
+        if not patches:
             return stats
 
-        patches = self._generate_mode3_patches(enhanced_image, labels, w, h)
-        pending_full: Optional[Dict] = None
+        pending_full: Optional[Dict[str, Any]] = None
         pair_idx = 0
         single_idx = 0
 
@@ -366,15 +364,29 @@ class YOLOSlidingWindowProcessor:
             for key in stats:
                 stats[key] += result[key]
 
-        for patch in patches:
-            if patch['is_full']:
+        if not plan.is_wide:
+            output_name = f"{base_name}_sq1120"
+            result = self._save_mode3_output(
+                patches[0]['patch'].image,
+                patches[0]['labels'],
+                output_image_dir,
+                output_label_dir,
+                output_name
+            )
+            update_stats(result)
+            return stats
+
+        for entry in patches:
+            patch: WideSlicePatch = entry['patch']
+            patch_labels = entry['labels']
+            if patch.is_full_window:
                 if pending_full is None:
-                    pending_full = patch
+                    pending_full = entry
                 else:
-                    stacked_image = np.vstack([pending_full['image'], patch['image']])
+                    stacked_image = stack_wide_slice_pair(pending_full['patch'], patch)
                     merged_labels = self._merge_labels_for_vertical_stack(
-                        pending_full['labels'], patch['labels'],
-                        pending_full['height'], patch['height']
+                        pending_full['labels'], patch_labels,
+                        pending_full['patch'].height, patch.height
                     )
                     name = f"{base_name}_pair_{pair_idx:04d}"
                     pair_idx += 1
@@ -389,7 +401,7 @@ class YOLOSlidingWindowProcessor:
                     name = f"{base_name}_single_{single_idx:04d}"
                     single_idx += 1
                     result = self._save_mode3_output(
-                        pending_full['image'], pending_full['labels'],
+                        pending_full['patch'].image, pending_full['labels'],
                         output_image_dir, output_label_dir, name
                     )
                     update_stats(result)
@@ -398,7 +410,7 @@ class YOLOSlidingWindowProcessor:
                 name = f"{base_name}_tail_{single_idx:04d}"
                 single_idx += 1
                 result = self._save_mode3_output(
-                    patch['image'], patch['labels'],
+                    patch.image, patch_labels,
                     output_image_dir, output_label_dir, name
                 )
                 update_stats(result)
@@ -407,7 +419,7 @@ class YOLOSlidingWindowProcessor:
             name = f"{base_name}_single_{single_idx:04d}"
             single_idx += 1
             result = self._save_mode3_output(
-                pending_full['image'], pending_full['labels'],
+                pending_full['patch'].image, pending_full['labels'],
                 output_image_dir, output_label_dir, name
             )
             update_stats(result)
