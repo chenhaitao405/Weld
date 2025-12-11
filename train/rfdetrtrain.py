@@ -10,14 +10,14 @@ model = RFDETRLarge()
 training_args = {
     "dataset_dir": "/datasets/PAR/Xray/datasets_merge/slice3_ratio_1",
     "epochs": 500,
-    "batch_size": 4,
+    "batch_size": 2,
     "grad_accum_steps": 8,
     "lr": 1e-4,
-    "output_dir": "./runs/1208/detrlarge/slice3mixed1",
+    "output_dir": "./runs/1208/detrlarge/slice3mixedp1_res840",
     "early_stopping": True,
     "run":"4batch",
     # "resume" : "runs/1208/detrlarge/SWRD_patch640_res560/checkpoint_best_regular.pth",
-    # "resolution":1120
+    "resolution":840
 
 }
 
@@ -79,7 +79,7 @@ with _log_terminal_output(log_file_path):
         output_dir=str(output_dir),
         early_stopping=training_args["early_stopping"],
         run = training_args["run"],
-        # resolution = training_args["resolution"]
+        resolution = training_args["resolution"]
         # resume = training_args["resume"],
     )
 
