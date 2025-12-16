@@ -22,6 +22,8 @@ profiles:
       roi_rotate: ROI_rotate
       patch_dir: patch_640
       cls_dir: patch_det
+      coco_dir: coco_from_patch
+      merged_coco_dir: coco_merged
     params:
       labelme2yolo:
         seg: true
@@ -47,7 +49,17 @@ profiles:
         mode: det
         script_path: convert/pj/seg2det.py
         balance_data: true
-
+        balance_ratio: 1.0
+      yolo2coco:
+        script_path: convert/yolo2coco.py
+        task: det
+        test_split_ratio: 0.0
+        split_seed: 42
+      merge_coco:
+        script_path: convert/merge_coco.py
+        dataset_b: roi2_merge/coco_det
+        splits: [train, valid]
+        merge_ratio: [1.0]
 
   linux_1205_folder:
     platform: Linux
@@ -66,14 +78,14 @@ profiles:
       - 9-1_8bit
       - 9-2_8bit
       - DP_8bit
-
-      
     outputs:
       yolo_dir: yolo
       roi_dir: ROI_1205
       roi_rotate: ROI_rotate_1205
       patch_dir: patch_
       cls_dir: patch_det
+      coco_dir: coco_from_patch
+      merged_coco_dir: coco_merged
     params:
       labelme2yolo:
         seg: true
@@ -99,6 +111,17 @@ profiles:
         mode: det
         script_path: convert/pj/seg2det.py
         balance_data: true
+        balance_ratio: 1.0
+      yolo2coco:
+        script_path: convert/yolo2coco.py
+        task: det
+        test_split_ratio: 0.0
+        split_seed: 42
+      merge_coco:
+        script_path: convert/merge_coco.py
+        dataset_b: roi2_merge/patch_det_coco
+        splits: [train, valid]
+        merge_ratio: [1.0]
 
   linux_SWRD_folder:
     platform: Linux
@@ -108,15 +131,15 @@ profiles:
       json_base_path: /datasets/PAR/Xray/opensource/SWRD8bit/swr_pipeline
       output_base_dir: swr_pipeline
       reference_label_map_path: roi2_merge/yolo/dataset.yaml
-    datasets:
-
-
+    datasets: []
     outputs:
       yolo_dir: yolo
       roi_dir: ROI_jpg
       roi_rotate: ROI_rotate
       patch_dir: patch_slice3
       cls_dir: patch_det_slice3
+      coco_dir: coco_from_patch
+      merged_coco_dir: coco_merged
     params:
       labelme2yolo:
         seg: true
@@ -142,3 +165,74 @@ profiles:
         mode: det
         script_path: convert/pj/seg2det.py
         balance_data: true
+        balance_ratio: 1.0
+      yolo2coco:
+        script_path: convert/yolo2coco.py
+        task: det
+        test_split_ratio: 0.0
+        split_seed: 42
+      merge_coco:
+        script_path: convert/merge_coco.py
+        dataset_b: swr_pipeline/patch_slice3_det_coco
+        splits: [train, valid]
+        merge_ratio: [1.0]
+
+  linux_self_1120-1215adjust:
+    platform: Linux
+    description: 1215标签调整
+    paths:
+      base_path: /datasets/PAR/Xray/self/1120/labeled
+      json_base_path: /datasets/PAR/Xray/self/1120/1215adjust
+      output_base_dir: 1215ROI3_patch640
+      reference_label_map_path: roi2_merge/yolo/dataset.yaml
+    datasets:
+      - D1
+      - D2
+      - D3
+      - D4
+      - img20250608
+      - img20250609
+    outputs:
+      yolo_dir: yolo
+      roi_dir: ROI
+      roi_rotate: ROI_rotate
+      patch_dir: patch_640
+      cls_dir: patch_det
+      coco_dir: coco_from_patch
+      merged_coco_dir: coco_merged
+    params:
+      labelme2yolo:
+        seg: true
+        unify_to_crack: false
+        script_path: convert/labelme2yolo.py
+      yolo_roi_extractor:
+        model_path: ./model/weldROI3.pt
+        roi_conf: 0.25
+        roi_iou: 0.45
+        padding: 0.1
+        mode: seg
+        script_path: convert/pj/yolo_roi_extractor.py
+      rotate_yolo:
+        script_path: convert/pj/rotateYOLOdate.py
+      patchandenhance:
+        overlap: 0.7
+        enhance_mode: windowing
+        slice_mode: 2   #            slice_mode: 1=仅增强, 2=滑动裁剪, 3=横切纵拼方形
+        window_size: [640, 640]
+        label_mode: seg
+        script_path: convert/pj/patchandenhance.py
+      seg2det:
+        mode: det
+        script_path: convert/pj/seg2det.py
+        balance_data: true
+        balance_ratio: 1.0
+      yolo2coco:
+        script_path: convert/yolo2coco.py
+        task: det
+        test_split_ratio: 0.05
+        split_seed: 42
+      merge_coco:
+        script_path: convert/merge_coco.py
+        dataset_b: /datasets/PAR/Xray/opensource/SWRD8bit/swr_pipeline/patch_det_coco
+        splits: [train, valid, test]
+        merge_ratio: [1.0]

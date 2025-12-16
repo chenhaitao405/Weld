@@ -23,7 +23,7 @@ ACTIVE_PROFILE_NAME = None
 BASE_PATH = ""
 JSON_BASE_PATH = ""
 OUTPUT_BASE_DIR = ""
-REFERENCE_LABEL_MAP_PATH = ""
+REFERENCE_LABEL_MAP_PATH = "/datasets/PAR/Xray/self/1120/labeled/roi2_merge/yolo/dataset.yaml"
 DATASETS: List[str] = []
 OUTPUT_CONFIG: Dict[str, str] = {}
 FIXED_PARAMS: Dict[str, Dict] = {}
@@ -97,6 +97,18 @@ STEP_INFO = {
         'func': 'step5_seg2det',
         'input': 'patch_dir',
         'output': 'cls_dir'
+    },
+    '6': {
+        'name': 'YOLO转COCO',
+        'func': 'step6_yolo2coco',
+        'input': 'cls_dir',
+        'output': 'coco_dir'
+    },
+    '7': {
+        'name': 'COCO数据集合并',
+        'func': 'step7_merge_coco',
+        'input': 'coco_dir',
+        'output': 'merged_coco_dir'
     }
 }
 
@@ -247,11 +259,11 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法：
-  python %(prog)s --steps 12345  # 运行所有5个步骤
-  python %(prog)s --steps 1234   # 只运行前4个步骤
-  python %(prog)s --steps 2345   # 只运行步骤2、3、4、5
-  python %(prog)s --steps 135    # 只运行步骤1、3、5
-  python %(prog)s --steps 2      # 只运行步骤2
+  python %(prog)s --steps 1234567  # 运行所有7个步骤
+  python %(prog)s --steps 1234     # 只运行前4个步骤
+  python %(prog)s --steps 2345     # 只运行步骤2、3、4、5
+  python %(prog)s --steps 135      # 只运行步骤1、3、5
+  python %(prog)s --steps 6        # 只运行YOLO→COCO
   
 步骤说明：
   1: Labelme转YOLO格式
@@ -259,14 +271,16 @@ def parse_arguments():
   3: YOLO竖图旋转
   4: 图像裁剪与增强
   5: 训练任务转换（seg转det/cls）
+  6: YOLO→COCO 转换
+  7: COCO 数据集合并
         """
     )
     
     parser.add_argument(
         '--steps',
         type=str,
-        default='12345',
-        help='要执行的步骤编号，如 "12345" 执行全部，"1234" 执行前四步 (默认: 12345)'
+        default='1234567',
+        help='要执行的步骤编号，如 "1234567" 执行全部，"1234" 执行前四步 (默认: 1234567)'
     )
     
     parser.add_argument(
@@ -288,12 +302,12 @@ def parse_arguments():
         default=None,
         help='配置文件中要使用的 profile 名称（默认使用 default_profile 或操作系统匹配项）'
     )
-    
+
     return parser.parse_args()
 
 def validate_steps(steps_str: str) -> List[str]:
     """验证并返回要执行的步骤列表"""
-    valid_steps = set('12345')
+    valid_steps = set('1234567')
     steps = []
     
     for char in steps_str:
@@ -542,17 +556,97 @@ def process_patch_enhance(input_dir: str, output_dir: str):
 
 def seg2det(input_dir: str, output_dir: str):
     """执行训练任务转换"""
-    script_path = get_abs_path(FIXED_PARAMS["seg2det"]["script_path"])
+    seg_cfg = FIXED_PARAMS["seg2det"]
+    script_path = get_abs_path(seg_cfg["script_path"])
     command = [
         sys.executable, script_path,
         "--input_dir", input_dir,
         "--output_dir", output_dir,
-        "--mode", str(FIXED_PARAMS["seg2det"]["mode"]),
+        "--mode", str(seg_cfg["mode"]),
     ]
-    if FIXED_PARAMS["seg2det"].get("balance_data"):
+    if seg_cfg.get("balance_data"):
         command.append("--balance_data")
+        balance_ratio = seg_cfg.get("balance_ratio")
+        if balance_ratio is not None:
+            command.extend(["--balance_ratio", str(balance_ratio)])
 
     run_command(command, "训练任务转换", param_key="seg2det")
+
+
+def process_yolo2coco(input_dir: str, output_dir: str):
+    """执行 YOLO→COCO 转换"""
+    yolo2coco_cfg = FIXED_PARAMS.get("yolo2coco")
+    if not yolo2coco_cfg:
+        raise KeyError("配置缺少 params.yolo2coco")
+
+    script_path = get_abs_path(yolo2coco_cfg["script_path"])
+    command = [
+        sys.executable, script_path,
+        "--input_dir", input_dir,
+        "--output_dir", output_dir
+    ]
+
+    task = yolo2coco_cfg.get("task")
+    if task:
+        command.extend(["--task", str(task)])
+    if yolo2coco_cfg.get("test_split_ratio") is not None:
+        command.extend(["--test_split_ratio", str(yolo2coco_cfg["test_split_ratio"])])
+    if yolo2coco_cfg.get("split_seed") is not None:
+        command.extend(["--split_seed", str(yolo2coco_cfg["split_seed"])])
+
+    run_command(command, "YOLO转COCO", param_key="yolo2coco")
+
+
+def process_merge_coco(dataset_a_dir: str, output_dir: str):
+    """执行 COCO 数据集合并"""
+    merge_cfg = FIXED_PARAMS.get("merge_coco")
+    if not merge_cfg:
+        raise KeyError("配置缺少 params.merge_coco")
+
+    dataset_b_raw = merge_cfg.get("dataset_b")
+    if not dataset_b_raw:
+        raise ValueError("merge_coco.dataset_b 未配置，请在 YAML 中指定")
+
+    dataset_b_path = resolve_path(dataset_b_raw, BASE_PATH)
+    script_path = get_abs_path(merge_cfg["script_path"])
+    command = [
+        sys.executable, script_path,
+        "--dataset-a", dataset_a_dir,
+        "--dataset-b", dataset_b_path,
+        "--output-dir", output_dir
+    ]
+
+    splits = merge_cfg.get("splits")
+    if splits:
+        command.extend(["--splits"] + [str(split) for split in splits])
+
+    if merge_cfg.get("prefix_a"):
+        command.extend(["--prefix-a", str(merge_cfg["prefix_a"])])
+    if merge_cfg.get("prefix_b"):
+        command.extend(["--prefix-b", str(merge_cfg["prefix_b"])])
+    if merge_cfg.get("copy_images"):
+        command.append("--copy-images")
+
+    merge_ratio_config = merge_cfg.get("merge_ratio")
+    logged_merge_ratio = None
+    if isinstance(merge_ratio_config, (list, tuple)):
+        ratio_values = [str(value) for value in merge_ratio_config if value is not None]
+        if ratio_values:
+            command.extend(["--merge-ratio"] + ratio_values)
+            logged_merge_ratio = list(merge_ratio_config)
+    elif merge_ratio_config is not None:
+        command.extend(["--merge-ratio", str(merge_ratio_config)])
+        logged_merge_ratio = merge_ratio_config
+
+    run_command(
+        command,
+        "合并COCO数据集",
+        param_key="merge_coco",
+        extra_info={
+            "dataset_b": str(dataset_b_path),
+            "merge_ratio": logged_merge_ratio if logged_merge_ratio is not None else "default"
+        }
+    )
 
 # =================== 步骤执行函数 ===================
 
@@ -616,6 +710,32 @@ def step5_seg2det():
         print("  提示：可能需要先执行步骤4")
     
     seg2det(OUTPUT_CONFIG["patch_dir"], OUTPUT_CONFIG["cls_dir"])
+
+
+def step6_yolo2coco():
+    """步骤6: YOLO→COCO 转换"""
+    print("\n" + "=" * 100)
+    print("📝 步骤6: YOLO→COCO 转换")
+    print("=" * 100)
+
+    if not os.path.exists(OUTPUT_CONFIG["cls_dir"]):
+        print(f"⚠️ 警告：det 数据目录不存在 {OUTPUT_CONFIG['cls_dir']}")
+        print("  提示：可能需要先执行步骤5")
+
+    process_yolo2coco(OUTPUT_CONFIG["cls_dir"], OUTPUT_CONFIG["coco_dir"])
+
+
+def step7_merge_coco():
+    """步骤7: 合并 COCO 数据集"""
+    print("\n" + "=" * 100)
+    print("📝 步骤7: 合并 COCO 数据集")
+    print("=" * 100)
+
+    if not os.path.exists(OUTPUT_CONFIG["coco_dir"]):
+        print(f"⚠️ 警告：COCO 转换输出不存在 {OUTPUT_CONFIG['coco_dir']}")
+        print("  提示：可能需要先执行步骤6")
+
+    process_merge_coco(OUTPUT_CONFIG["coco_dir"], OUTPUT_CONFIG["merged_coco_dir"])
 
 def main():
     # 解析命令行参数

@@ -29,6 +29,61 @@ from utils.wide_slice_utils import (
 )
 
 
+def _load_rfdet_model_kwargs(model_path: Path) -> Dict[str, Any]:
+    """Extract inference-relevant kwargs stored in the RF-DETR checkpoint."""
+    try:
+        import torch
+    except ImportError:
+        return {}
+
+    if not model_path.exists():
+        return {}
+    try:
+        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+    except Exception:
+        return {}
+
+    args = checkpoint.get("args")
+    if args is None:
+        return {}
+
+    allowed_fields = {
+        "encoder",
+        "out_feature_indexes",
+        "dec_layers",
+        "two_stage",
+        "projector_scale",
+        "hidden_dim",
+        "patch_size",
+        "num_windows",
+        "sa_nheads",
+        "ca_nheads",
+        "dec_n_points",
+        "bbox_reparam",
+        "lite_refpoint_refine",
+        "layer_norm",
+        "amp",
+        "num_classes",
+        "resolution",
+        "group_detr",
+        "gradient_checkpointing",
+        "positional_encoding_size",
+        "ia_bce_loss",
+        "cls_loss_coef",
+        "segmentation_head",
+        "mask_downsample_ratio",
+        "num_queries",
+        "num_select"
+    }
+    extracted: Dict[str, Any] = {}
+    for field in allowed_fields:
+        if hasattr(args, field):
+            value = getattr(args, field)
+            if value is not None:
+                extracted[field] = value
+    return extracted
+
+
 def _ensure_single_prediction(detections: Any):
     if detections is None:
         return None
@@ -65,6 +120,11 @@ class RFDetrDetectionModel:
 
     def _load_model(self, device: Optional[str]):
         model_kwargs: Dict[str, Any] = {"pretrain_weights": str(self.model_path)}
+        checkpoint_kwargs = _load_rfdet_model_kwargs(self.model_path)
+        if checkpoint_kwargs:
+            checkpoint_kwargs.pop("pretrain_weights", None)
+            checkpoint_kwargs.pop("device", None)
+            model_kwargs.update(checkpoint_kwargs)
         if device:
             model_kwargs["device"] = device
         if self.model_variant == "medium":
