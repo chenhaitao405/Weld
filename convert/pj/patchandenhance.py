@@ -344,17 +344,21 @@ class YOLOSlidingWindowProcessor:
             return {'processed': 0, 'with_defects': 0, 'without_defects': 0}
 
         labels = read_yolo_labels(label_path, self.label_mode)
-        enhanced_image = enhance_image(image, self.enhance_mode)
-        h, w = enhanced_image.shape[:2]
+        h, w = image.shape[:2]
         if h == 0 or w == 0:
             return {'processed': 0, 'with_defects': 0, 'without_defects': 0}
 
         base_name = Path(image_path).stem
         stats = {'processed': 0, 'with_defects': 0, 'without_defects': 0}
 
-        plan, patches = self._generate_mode3_patches(enhanced_image, labels, w, h)
+        plan, patches = self._generate_mode3_patches(image, labels, w, h)
         if not patches:
             return stats
+
+        # 先切片，再对每个切片单独增强，确保拼接前的图像质量一致
+        for entry in patches:
+            slice_patch: WideSlicePatch = entry['patch']
+            slice_patch.image = enhance_image(slice_patch.image, self.enhance_mode)
 
         pending_full: Optional[Dict[str, Any]] = None
         pair_idx = 0
