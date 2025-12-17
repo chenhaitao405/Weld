@@ -67,7 +67,7 @@ profiles:
     paths:
       base_path: /datasets/PAR/Xray/self/1208
       json_base_path: /datasets/PAR/Xray/self/1208/adjust_label
-      output_base_dir: roi2_merge
+      output_base_dir: roi3_merge
       reference_label_map_path: roi2_merge/yolo/dataset.yaml
     datasets:
       - 6-1_8bit
@@ -92,7 +92,7 @@ profiles:
         unify_to_crack: false
         script_path: convert/labelme2yolo.py
       yolo_roi_extractor:
-        model_path: /home/lenovo/code/CHT/detect/ultralytics-main/runs/detect/1208crack_pretrain22/weights/best.pt
+        model_path: ./model/weldROI3.pt
         roi_conf: 0.25
         roi_iou: 0.45
         padding: 0.1
@@ -103,24 +103,24 @@ profiles:
       patchandenhance:
         overlap: 0.5
         enhance_mode: windowing
-        slice_mode: 2
+        slice_mode: 3
         window_size: [640, 640]
         label_mode: seg
         script_path: convert/pj/patchandenhance.py
       seg2det:
         mode: det
         script_path: convert/pj/seg2det.py
-        balance_data: true
+        balance_data: false
         balance_ratio: 1.0
       yolo2coco:
         script_path: convert/yolo2coco.py
         task: det
-        test_split_ratio: 0.0
+        test_split_ratio: 0.05
         split_seed: 42
       merge_coco:
         script_path: convert/merge_coco.py
-        dataset_b: roi2_merge/patch_det_coco
-        splits: [train, valid]
+        dataset_b: /datasets/PAR/Xray/self/1120/labeled/roi2_merge/ROI_rotate_slice3_det_coco
+        splits: [train, valid,test]
         merge_ratio: [1.0]
 
   linux_SWRD_folder:
