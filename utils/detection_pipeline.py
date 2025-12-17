@@ -473,9 +473,10 @@ def _process_roi_and_detection(
         if wide_slice and wide_slice.enabled:
             wide_debug_dir = (roi_debug_dir / "wideslice") if roi_debug_dir else None
             extra_detections = _run_wide_slice_detection(
-                prepared_roi=prepared_roi,
+                aligned_roi=aligned_roi,
                 detection_model=detection_model,
                 slice_cfg=wide_slice,
+                enhance_mode=enhance_mode,
                 debug_dir=wide_debug_dir,
                 font_renderer=font_renderer
             )
@@ -611,9 +612,10 @@ def _run_patch_detection(aligned_roi: np.ndarray,
     return _restore_detections_from_alignment(detections, rotation_meta)
 
 
-def _run_wide_slice_detection(prepared_roi: np.ndarray,
+def _run_wide_slice_detection(aligned_roi: np.ndarray,
                               detection_model: RFDetrDetectionModel,
                               slice_cfg: WideSliceConfig,
+                              enhance_mode: str,
                               debug_dir: Optional[Path],
                               font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
     if not slice_cfg.enabled:
@@ -621,9 +623,12 @@ def _run_wide_slice_detection(prepared_roi: np.ndarray,
 
     params = slice_cfg.to_params()
     target_size = max(1, int(params.target_size))
-    plan: WideSlicePlan = build_wide_slice_plan(prepared_roi, params)
+    plan: WideSlicePlan = build_wide_slice_plan(aligned_roi, params)
     if not plan.patches:
         return []
+
+    for patch in plan.patches:
+        patch.image = enhance_image(patch.image, mode=enhance_mode, output_bits=8)
 
     detections: List[Dict[str, Any]] = []
     slice_idx = 0
