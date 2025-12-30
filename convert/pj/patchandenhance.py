@@ -3,10 +3,16 @@ import sys
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from tqdm import tqdm
 import random
 import shutil
+
+# 模式3相关常量
+MODE3_ASPECT_THRESHOLD = 4.0
+MODE3_WINDOW_RATIO = 2.0
+MODE3_OVERLAP = 0.3
+MODE3_TARGET_SIZE = 1120
 
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +40,14 @@ from utils.constants import (
     DEFAULT_OVERLAP_RATIO, DEFAULT_WINDOW_SIZE,
     DEFAULT_JPEG_QUALITY, MIN_BBOX_RATIO, MIN_POLYGON_AREA_RATIO
 )
+from utils.wide_slice_utils import (
+    WideSliceParams,
+    WideSlicePatch,
+    WideSlicePlan,
+    build_wide_slice_plan,
+    resize_slice_to_square,
+    stack_wide_slice_pair
+)
 
 
 class YOLOSlidingWindowProcessor:
@@ -45,7 +59,8 @@ class YOLOSlidingWindowProcessor:
                  label_mode: str = 'det',
                  min_bbox_ratio: float = MIN_BBOX_RATIO,
                  min_polygon_area_ratio: float = MIN_POLYGON_AREA_RATIO,
-                 no_slice: bool = False):
+                 no_slice: bool = False,
+                 slice_mode: int = 2):
         """
         初始化处理器
 
@@ -55,14 +70,21 @@ class YOLOSlidingWindowProcessor:
             label_mode: 标签模式 ('det' 或 'seg')
             min_bbox_ratio: 最小边界框尺寸比例
             min_polygon_area_ratio: 最小多边形面积比例
-            no_slice: 是否不进行切片，仅增强图像
+            no_slice: 是否不进行切片，仅增强图像（兼容旧参数，等价于 slice_mode=1）
+            slice_mode: 1=仅增强, 2=滑动裁剪, 3=横切纵拼方形
         """
+        if no_slice:
+            slice_mode = 1
+        if slice_mode not in (1, 2, 3):
+            raise ValueError("slice_mode 必须是 1/2/3")
+
         self.overlap_ratio = overlap_ratio
         self.enhance_mode = enhance_mode
         self.label_mode = label_mode
         self.min_bbox_ratio = min_bbox_ratio
         self.min_polygon_area_ratio = min_polygon_area_ratio
-        self.no_slice = no_slice
+        self.slice_mode = slice_mode
+        self.no_slice = slice_mode == 1
 
         # 统计信息
         self.stats = {
@@ -70,12 +92,20 @@ class YOLOSlidingWindowProcessor:
             'val': {'processed': 0, 'with_defects': 0, 'without_defects': 0}
         }
 
-        print(f"YOLO{'增强' if no_slice else '滑动窗口'}处理器初始化:")
-        if not no_slice:
+        print(f"YOLO处理器初始化 - 模式 {slice_mode}: {self._describe_slice_mode()}")
+        if slice_mode == 2:
             print(f"  - 重叠率: {overlap_ratio}")
         print(f"  - 增强模式: {enhance_mode}")
         print(f"  - 标签模式: {label_mode}")
-        print(f"  - 仅增强不切片: {no_slice}")
+        print(f"  - 模式切换参数: {slice_mode}")
+
+    def _describe_slice_mode(self) -> str:
+        descriptions = {
+            1: "仅增强（不切片）",
+            2: "滑动窗口裁剪",
+            3: "横切纵拼成方形"
+        }
+        return descriptions.get(self.slice_mode, "未知模式")
 
     def adjust_yolo_labels_for_crop(self, labels: List[List[float]],
                                     crop_x: int, crop_y: int,
@@ -206,6 +236,200 @@ class YOLOSlidingWindowProcessor:
 
         return stats
 
+    def _save_mode3_output(self, image: np.ndarray, labels: List[List[float]],
+                            output_image_dir: str, output_label_dir: str,
+                            name: str) -> Dict[str, int]:
+        """辅助函数：保存模式3生成的图像和标签"""
+        resized = resize_slice_to_square(image, MODE3_TARGET_SIZE)
+        image_save_path = Path(output_image_dir) / f"{name}.jpg"
+        label_save_path = Path(output_label_dir) / f"{name}.txt"
+
+        image_save_path.parent.mkdir(parents=True, exist_ok=True)
+        label_save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        cv2.imwrite(str(image_save_path), resized, [cv2.IMWRITE_JPEG_QUALITY, DEFAULT_JPEG_QUALITY])
+        save_yolo_labels(labels, str(label_save_path), self.label_mode)
+
+        stats = {'processed': 1, 'with_defects': 0, 'without_defects': 0}
+        if len(labels) > 0:
+            stats['with_defects'] = 1
+        else:
+            stats['without_defects'] = 1
+        return stats
+
+    def _generate_mode3_patches(self, image: np.ndarray, labels: List[List[float]],
+                                original_w: int, original_h: int) -> Tuple[WideSlicePlan, List[Dict[str, Any]]]:
+        """按照模式3要求沿宽度滑动裁剪，并调整对应的标签"""
+        params = WideSliceParams(
+            aspect_ratio_threshold=MODE3_ASPECT_THRESHOLD,
+            window_ratio=MODE3_WINDOW_RATIO,
+            overlap=MODE3_OVERLAP,
+            target_size=MODE3_TARGET_SIZE
+        )
+        plan: WideSlicePlan = build_wide_slice_plan(image, params)
+        patch_entries: List[Dict[str, Any]] = []
+
+        for patch in plan.patches:
+            crop_x = int(round(patch.x_offset))
+            adjusted_labels = self.adjust_yolo_labels_for_crop(
+                labels,
+                crop_x,
+                0,
+                patch.width,
+                patch.height,
+                original_w,
+                original_h
+            )
+            patch_entries.append({
+                'patch': patch,
+                'labels': adjusted_labels
+            })
+
+        return plan, patch_entries
+
+    def _merge_labels_for_vertical_stack(self,
+                                         top_labels: List[List[float]],
+                                         bottom_labels: List[List[float]],
+                                         top_h: int,
+                                         bottom_h: int) -> List[List[float]]:
+        """将上下两个patch的标签映射到纵向拼接后的坐标系"""
+        total_h = top_h + bottom_h
+        merged: List[List[float]] = []
+
+        if total_h == 0:
+            return merged
+
+        if self.label_mode == 'det':
+            for labels, offset, patch_h in (
+                (top_labels, 0, top_h),
+                (bottom_labels, top_h, bottom_h)
+            ):
+                for label in labels:
+                    if len(label) < 5:
+                        continue
+                    new_label = label.copy()
+                    new_label[2] = (label[2] * patch_h + offset) / total_h
+                    new_label[4] = (label[4] * patch_h) / total_h
+                    merged.append(new_label)
+        else:  # seg
+            for labels, offset, patch_h in (
+                (top_labels, 0, top_h),
+                (bottom_labels, top_h, bottom_h)
+            ):
+                for label in labels:
+                    if len(label) < 7:
+                        continue
+                    new_label = [label[0]]
+                    coords: List[float] = []
+                    for i in range(1, len(label), 2):
+                        if i + 1 >= len(label):
+                            break
+                        x = label[i]
+                        y = label[i + 1]
+                        adjusted_y = (y * patch_h + offset) / total_h
+                        coords.extend([x, adjusted_y])
+                    if len(coords) >= 6:
+                        new_label.extend(coords)
+                        merged.append(new_label)
+
+        return merged
+
+    def process_single_image_mode3(self, image_path: str, label_path: str,
+                                   output_image_dir: str,
+                                   output_label_dir: str) -> Dict[str, int]:
+        """模式3：横切纵拼生成方形"""
+        image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        if image is None:
+            print(f"无法读取图像: {image_path}")
+            return {'processed': 0, 'with_defects': 0, 'without_defects': 0}
+
+        labels = read_yolo_labels(label_path, self.label_mode)
+        h, w = image.shape[:2]
+        if h == 0 or w == 0:
+            return {'processed': 0, 'with_defects': 0, 'without_defects': 0}
+
+        base_name = Path(image_path).stem
+        stats = {'processed': 0, 'with_defects': 0, 'without_defects': 0}
+
+        plan, patches = self._generate_mode3_patches(image, labels, w, h)
+        if not patches:
+            return stats
+
+        # 先切片，再对每个切片单独增强，确保拼接前的图像质量一致
+        for entry in patches:
+            slice_patch: WideSlicePatch = entry['patch']
+            slice_patch.image = enhance_image(slice_patch.image, self.enhance_mode)
+
+        pending_full: Optional[Dict[str, Any]] = None
+        pair_idx = 0
+        single_idx = 0
+
+        def update_stats(result: Dict[str, int]):
+            for key in stats:
+                stats[key] += result[key]
+
+        if not plan.is_wide:
+            output_name = f"{base_name}_sq1120"
+            result = self._save_mode3_output(
+                patches[0]['patch'].image,
+                patches[0]['labels'],
+                output_image_dir,
+                output_label_dir,
+                output_name
+            )
+            update_stats(result)
+            return stats
+
+        for entry in patches:
+            patch: WideSlicePatch = entry['patch']
+            patch_labels = entry['labels']
+            if patch.is_full_window:
+                if pending_full is None:
+                    pending_full = entry
+                else:
+                    stacked_image = stack_wide_slice_pair(pending_full['patch'], patch)
+                    merged_labels = self._merge_labels_for_vertical_stack(
+                        pending_full['labels'], patch_labels,
+                        pending_full['patch'].height, patch.height
+                    )
+                    name = f"{base_name}_pair_{pair_idx:04d}"
+                    pair_idx += 1
+                    result = self._save_mode3_output(
+                        stacked_image, merged_labels,
+                        output_image_dir, output_label_dir, name
+                    )
+                    update_stats(result)
+                    pending_full = None
+            else:
+                if pending_full is not None:
+                    name = f"{base_name}_single_{single_idx:04d}"
+                    single_idx += 1
+                    result = self._save_mode3_output(
+                        pending_full['patch'].image, pending_full['labels'],
+                        output_image_dir, output_label_dir, name
+                    )
+                    update_stats(result)
+                    pending_full = None
+
+                name = f"{base_name}_tail_{single_idx:04d}"
+                single_idx += 1
+                result = self._save_mode3_output(
+                    patch.image, patch_labels,
+                    output_image_dir, output_label_dir, name
+                )
+                update_stats(result)
+
+        if pending_full is not None:
+            name = f"{base_name}_single_{single_idx:04d}"
+            single_idx += 1
+            result = self._save_mode3_output(
+                pending_full['patch'].image, pending_full['labels'],
+                output_image_dir, output_label_dir, name
+            )
+            update_stats(result)
+
+        return stats
+
     def process_single_image(self, image_path: str, label_path: str,
                              output_image_dir: str, output_label_dir: str,
                              window_size: Tuple[int, int] = None) -> Dict:
@@ -222,13 +446,17 @@ class YOLOSlidingWindowProcessor:
         Returns:
             处理统计信息
         """
-        # 如果不切片，调用专门的处理函数
-        if self.no_slice:
+        # 根据模式分派
+        if self.slice_mode == 1:
             return self.process_single_image_no_slice(
                 image_path, label_path, output_image_dir, output_label_dir
             )
+        if self.slice_mode == 3:
+            return self.process_single_image_mode3(
+                image_path, label_path, output_image_dir, output_label_dir
+            )
 
-        # 原有的切片处理逻辑
+        # 模式2：原有的切片处理逻辑
         # 读取图像
         image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         if image is None:
@@ -308,12 +536,16 @@ class YOLOSlidingWindowProcessor:
         # 创建输出目录结构
         create_directory_structure(output_path)
 
-        processing_type = "增强" if self.no_slice else "滑动窗口处理"
-        print(f"开始{processing_type}YOLO数据集...")
+        mode_desc = self._describe_slice_mode()
+        print(f"开始{mode_desc}流程...")
         print(f"  - 输入目录: {input_dir}")
         print(f"  - 输出目录: {output_dir}")
-        if not self.no_slice:
+        if self.slice_mode == 2:
             print(f"  - 窗口大小: {window_size if window_size else '自动'}")
+            print(f"  - 重叠率: {self.overlap_ratio}")
+        elif self.slice_mode == 3:
+            print(f"  - 模式3窗口宽度系数: {MODE3_WINDOW_RATIO}")
+            print(f"  - 模式3滑动重叠率: {MODE3_OVERLAP}")
 
         # 处理train和val数据
         for split in ['train', 'val']:
@@ -380,12 +612,20 @@ class YOLOSlidingWindowProcessor:
             preprocessing_info = {
                 'enhance_mode': self.enhance_mode,
                 'label_mode': self.label_mode,
-                'no_slice': self.no_slice
+                'no_slice': self.slice_mode == 1,
+                'slice_mode': self.slice_mode
             }
 
-            if not self.no_slice:
+            if self.slice_mode == 2:
                 preprocessing_info['window_size'] = list(window_size) if window_size else 'auto'
                 preprocessing_info['overlap_ratio'] = self.overlap_ratio
+            elif self.slice_mode == 3:
+                preprocessing_info['mode3'] = {
+                    'target_size': MODE3_TARGET_SIZE,
+                    'aspect_ratio_threshold': MODE3_ASPECT_THRESHOLD,
+                    'window_ratio': MODE3_WINDOW_RATIO,
+                    'overlap': MODE3_OVERLAP
+                }
 
             yaml_data['preprocessing'] = preprocessing_info
 
@@ -402,7 +642,7 @@ class YOLOSlidingWindowProcessor:
         print("处理完成统计:")
         print(f"{'=' * 60}")
 
-        unit = "images" if self.no_slice else "patches"
+        unit = "images" if self.slice_mode == 1 else "patches"
 
         for split in ['train', 'val']:
             stats = self.stats[split]
@@ -465,7 +705,7 @@ def main():
   python patchandenhance.py --input_dir ./roi_dataset --output_dir ./patched_dataset
 
   # 仅增强不切片
-  python patchandenhance.py --input_dir ./roi_dataset --output_dir ./enhanced_dataset --no_slice
+  python patchandenhance.py --input_dir ./roi_dataset --output_dir ./enhanced_dataset --slice_mode 1
 
   # 分割模式
   python patchandenhance.py --input_dir ./roi_dataset --output_dir ./patched_dataset --label_mode seg
@@ -480,7 +720,7 @@ def main():
   python patchandenhance.py --input_dir ./roi_dataset --output_dir ./patched_dataset --enhance_mode windowing
 
   # 仅增强不切片，使用窗宽窗位增强
-  python patchandenhance.py --input_dir ./roi_dataset --output_dir ./enhanced_dataset --no_slice --enhance_mode windowing
+  python patchandenhance.py --input_dir ./roi_dataset --output_dir ./enhanced_dataset --slice_mode 1 --enhance_mode windowing
 
   # 平衡数据集（1:1比例）
   python patchandenhance.py --input_dir ./roi_dataset --output_dir ./patched_dataset --balance
@@ -495,17 +735,19 @@ def main():
     parser.add_argument('--output_dir', type=str, required=True,
                         help='输出目录路径')
     parser.add_argument('--window_size', type=int, nargs=2, default=None,
-                        help='窗口大小 [width height]，默认自动确定（仅在切片模式下有效）')
+                        help='窗口大小 [width height]，默认自动（仅模式2生效）')
     parser.add_argument('--overlap', type=float, default=0.5,
-                        help='滑动窗口重叠率 (0.0-1.0)，默认0.5（仅在切片模式下有效）')
+                        help='滑动窗口重叠率 (0.0-1.0)，默认0.5（仅模式2生效）')
     parser.add_argument('--enhance_mode', type=str, choices=['original', 'windowing'],
                         default='original',
                         help='图像增强模式: original(直方图均衡+CLAHE) 或 windowing(窗宽窗位)')
     parser.add_argument('--label_mode', type=str, choices=['det', 'seg'],
                         default='det',
                         help='标签模式: det(检测边界框) 或 seg(分割多边形)')
+    parser.add_argument('--slice_mode', type=int, choices=[1, 2, 3], default=2,
+                        help='切片模式: 1=仅增强, 2=滑动裁剪, 3=横裁纵拼')
     parser.add_argument('--no_slice', action='store_true',
-                        help='不进行切片，仅对图像进行增强')
+                        help='兼容参数，等价于 --slice_mode 1')
     parser.add_argument('--balance', action='store_true',
                         help='平衡数据集')
     parser.add_argument('--balance_ratio', type=float, default=1.0,
@@ -513,20 +755,25 @@ def main():
 
     args = parser.parse_args()
 
-    # 处理窗口大小参数
-    window_size = tuple(args.window_size) if args.window_size else None
+    slice_mode = args.slice_mode
+    if args.no_slice:
+        print("提示: --no_slice 已弃用，等价于 --slice_mode 1")
+        slice_mode = 1
 
-    # 如果选择不切片，窗口大小参数无效
-    if args.no_slice and args.window_size:
-        print("警告: --no_slice 模式下，--window_size 参数将被忽略")
+    window_size = tuple(args.window_size) if args.window_size else None
+    if slice_mode != 2 and window_size is not None:
+        print(f"提示: slice_mode={slice_mode} 下忽略 --window_size 参数")
         window_size = None
+
+    if slice_mode != 2 and abs(args.overlap - DEFAULT_OVERLAP_RATIO) > 1e-6:
+        print(f"提示: slice_mode={slice_mode} 下 --overlap 参数将被忽略")
 
     # 创建处理器
     processor = YOLOSlidingWindowProcessor(
         overlap_ratio=args.overlap,
         enhance_mode=args.enhance_mode,
         label_mode=args.label_mode,
-        no_slice=args.no_slice
+        slice_mode=slice_mode
     )
 
     # 处理数据集

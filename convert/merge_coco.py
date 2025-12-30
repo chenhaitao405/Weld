@@ -20,6 +20,7 @@
 
 import argparse
 import json
+import math
 import os
 import shutil
 from datetime import datetime
@@ -61,7 +62,25 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="若指定则复制图像文件；默认创建软链接"
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--merge-ratio",
+        nargs="+",
+        type=float,
+        metavar="R",
+        help=(
+            "控制 dataset-a 与 dataset-b 的融合比例：同时提供两个值时分别表示对两个数据集按各自占比抽取；"
+            "只提供一个值时，以数据量较少的数据集为基数，较少的数据集全量合并，较多的数据集按该比例抽取"
+        )
+    )
+
+    args = parser.parse_args()
+    if args.merge_ratio is not None:
+        if len(args.merge_ratio) not in (1, 2):
+            parser.error("--merge-ratio 仅支持 1 个或 2 个浮点值")
+        for value in args.merge_ratio:
+            if value < 0:
+                parser.error("--merge-ratio 中的值必须 >= 0")
+    return args
 
 
 def _sanitize_prefix(prefix: Optional[str]) -> str:
@@ -74,7 +93,8 @@ def _sanitize_prefix(prefix: Optional[str]) -> str:
 
 def _load_split(dataset_root: Path,
                 split_name: str,
-                prefix: str) -> Optional[Dict]:
+                prefix: str,
+                source_label: str) -> Optional[Dict]:
     split_dir = dataset_root / split_name
     if not split_dir.exists():
         return None
@@ -96,8 +116,84 @@ def _load_split(dataset_root: Path,
         "dataset_name": dataset_root.name,
         "prefix": prefix,
         "split_dir": split_dir,
-        "data": annotation_data
+        "data": annotation_data,
+        "source": source_label
     }
+
+
+def _subset_entry_by_count(entry: Dict, keep_count: int) -> int:
+    images = entry["data"].get("images") or []
+    total = len(images)
+    keep = max(0, min(int(keep_count), total))
+    if keep == total:
+        return total
+
+    selected_images = images[:keep]
+    selected_ids = {int(img["id"]) for img in selected_images}
+    entry["data"]["images"] = selected_images
+    annotations = entry["data"].get("annotations") or []
+    entry["data"]["annotations"] = [
+        ann for ann in annotations if int(ann.get("image_id")) in selected_ids
+    ]
+    return keep
+
+
+def _calc_ratio_count(total: int, ratio: float) -> int:
+    if total <= 0 or ratio <= 0:
+        return 0
+    keep = math.floor(total * ratio)
+    if keep == 0 and total > 0:
+        keep = 1
+    return min(total, keep)
+
+
+def _apply_merge_ratio(entries: List[Dict],
+                       ratio_cfg: Optional[Dict],
+                       split_name: str) -> None:
+    if ratio_cfg is None or len(entries) <= 1:
+        return
+
+    dataset_lookup = {entry.get("source"): entry for entry in entries}
+    entry_a = dataset_lookup.get("A")
+    entry_b = dataset_lookup.get("B")
+    if entry_a is None or entry_b is None:
+        print(f"⚠️ split '{split_name}' 缺少 dataset-a 或 dataset-b，忽略 --merge-ratio")
+        return
+
+    images_a = len(entry_a["data"].get("images") or [])
+    images_b = len(entry_b["data"].get("images") or [])
+
+    if ratio_cfg["mode"] == "explicit":
+        ratio_a, ratio_b = ratio_cfg["values"]
+        keep_a = _calc_ratio_count(images_a, ratio_a)
+        keep_b = _calc_ratio_count(images_b, ratio_b)
+        keep_a = _subset_entry_by_count(entry_a, keep_a)
+        keep_b = _subset_entry_by_count(entry_b, keep_b)
+        print(
+            f"ℹ️ split '{split_name}' --merge-ratio 应用结果："
+            f"{entry_a['dataset_name']} {keep_a}/{images_a} 张, "
+            f"{entry_b['dataset_name']} {keep_b}/{images_b} 张"
+        )
+        return
+
+    ratio_value = ratio_cfg["value"]
+    if images_a <= images_b:
+        smaller_entry, larger_entry = entry_a, entry_b
+    else:
+        smaller_entry, larger_entry = entry_b, entry_a
+
+    smaller_total = len(smaller_entry["data"].get("images") or [])
+    larger_total = len(larger_entry["data"].get("images") or [])
+    smaller_keep = _subset_entry_by_count(smaller_entry, smaller_total)
+    larger_keep = _subset_entry_by_count(
+        larger_entry,
+        min(larger_total, _calc_ratio_count(smaller_total, ratio_value))
+    )
+    print(
+        f"ℹ️ split '{split_name}' --merge-ratio (参考少量数据集) 应用结果："
+        f"{smaller_entry['dataset_name']} {smaller_keep}/{smaller_total} 张, "
+        f"{larger_entry['dataset_name']} {larger_keep}/{larger_total} 张"
+    )
 
 
 def _link_or_copy_image(source: Path, target: Path, copy_images: bool):
@@ -305,11 +401,24 @@ def main():
     prefix_a = _sanitize_prefix(args.prefix_a) if args.prefix_a is not None else default_prefix_a
     prefix_b = _sanitize_prefix(args.prefix_b) if args.prefix_b is not None else default_prefix_b
 
+    ratio_cfg: Optional[Dict] = None
+    if args.merge_ratio:
+        if len(args.merge_ratio) == 2:
+            ratio_cfg = {
+                "mode": "explicit",
+                "values": (args.merge_ratio[0], args.merge_ratio[1])
+            }
+        else:
+            ratio_cfg = {
+                "mode": "relative",
+                "value": args.merge_ratio[0]
+            }
+
     summary: Dict[str, Dict[str, int]] = {}
     for split_name in args.splits:
         entries: List[Dict] = []
-        split_a = _load_split(dataset_a, split_name, prefix_a)
-        split_b = _load_split(dataset_b, split_name, prefix_b)
+        split_a = _load_split(dataset_a, split_name, prefix_a, "A")
+        split_b = _load_split(dataset_b, split_name, prefix_b, "B")
         if split_a:
             entries.append(split_a)
         if split_b:
@@ -318,6 +427,8 @@ def main():
         if not entries:
             print(f"⚠️ 未在两个数据集中找到 split '{split_name}'，跳过")
             continue
+
+        _apply_merge_ratio(entries, ratio_cfg, split_name)
 
         stats = merge_split(entries, output_dir / split_name, args.copy_images)
         summary[split_name] = stats

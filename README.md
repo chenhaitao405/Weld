@@ -16,7 +16,7 @@
 ## 环境要求
 
 - Python 3.x
-- 依赖库：`tqdm`、`opencv-python`、`ultralytics`等（需自行安装）
+- 依赖库：`tqdm`、`opencv-python`、`ultrclaalytics`等（需自行安装）
 - 支持Windows和Linux操作系统（需在配置中正确设置路径）
 
 ## 配置说明
@@ -50,7 +50,7 @@ python run_data_pipeline.py --steps [步骤编号] [--force]
 3. **竖图旋转**（步骤3）
    - 将竖直图像统一旋转到水平方向，保持标签一致
 4. **图像裁剪与增强**（步骤4）
-   - 滑窗裁剪、增强ROI，可设置窗口、overlap、窗宽窗位以及`--no_slice`
+   - 滑窗裁剪、增强ROI，可设置窗口、overlap、窗宽窗位以及`--slice_mode`（1=仅增强，2=滑动裁剪，3=横裁纵拼方形）
 5. **训练任务转换**（步骤5）
    - 使用`seg2det.py`在分割、检测、分类任务间转换，并支持`--balance_data`
 
