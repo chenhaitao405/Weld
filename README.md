@@ -16,7 +16,7 @@
 ## 环境要求
 
 - Python 3.x
-- 依赖库：`tqdm`、`opencv-python`、`ultralytics`等（需自行安装）
+- 依赖库：`tqdm`、`opencv-python`、`ultrclaalytics`等（需自行安装）
 - 支持Windows和Linux操作系统（需在配置中正确设置路径）
 
 ## 配置说明

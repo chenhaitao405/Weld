@@ -23,16 +23,16 @@ CLASS_NAMES = [
 model = RFDETRLarge()
 
 DEFAULT_TRAINING_ARGS = {
-    "dataset_dir": "/datasets/PAR/Xray/self/1208/roi3_merge/coco_merged",
+    "dataset_dir": "/datasets/PAR/Xray/self/1120/labeled/roi2_merge/ROI_rotate_slice3_det_coco",
     "epochs": 500,
     "batch_size": 2,
     "grad_accum_steps": 8,
     "lr": 1e-4,
     "output_dir": "./runs/1208/detrlarge",
     "early_stopping": True,
-    "run": "slice3_allselfdata_res840",  # mlflow 的 run name
+    "run": "1120data_res840_train2",  # mlflow 的 run name
     # "resume" : "runs/1208/detrlarge/SWRD_patch640_res560/checkpoint_best_regular.pth",
-    "resolution": 560,
+    "resolution": 840,
     # "lr_scheduler": "cosine",
     # "warmup_epochs": 5,
     # "lr_min_factor": 0.05,
