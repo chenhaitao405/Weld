@@ -8,6 +8,8 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
+import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,16 +26,20 @@ from tqdm import tqdm
 from utils.annotation_loader import AnnotationLoader, AnnotationRecord
 from utils.pipeline_utils import FontRenderer, load_image
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+
 
 STATUS_SUCCESS_CLASS = "成功分类"
 STATUS_SUCCESS_DETECT = "成功检出"
 STATUS_MISSED = "漏检"
+STATUS_UNLABELED = "漏标注"
 STATUS_FALSE = "误检"
 
 STATUS_COLORS = {
     STATUS_SUCCESS_CLASS: (46, 204, 113),    # 绿色
     STATUS_SUCCESS_DETECT: (255, 165, 0),    # 橙色
     STATUS_MISSED: (0, 0, 255),              # 红色
+    STATUS_UNLABELED: (0, 215, 255),         # 金色 (BGR)
     STATUS_FALSE: (142, 68, 173)             # 紫色
 }
 
@@ -100,6 +106,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--font-size", type=int, default=24, help="绘制文字的字号")
     parser.add_argument("--match-mode", choices=["best", "multi"], default="multi",
                         help="best=每个GT只匹配IoU最大的预测；multi=所有超过阈值的预测都视为命中")
+    parser.add_argument("--verified-threshold", type=float, default=0.75,
+                        help="(1-IoU)*confidence 超过该阈值即视为漏标注，默认0.75")
+    parser.add_argument("--verified-image-dir", default=None,
+                        help="漏标注原图复制到的子目录，默认 verified_image（位于输出目录内）")
+    parser.add_argument("--verified-dir", dest="legacy_verified_dir", default=None,
+                        help="(兼容参数) 同 --verified-image-dir，后续版本将移除")
+    parser.add_argument("--export-verified-bundle", action="store_true",
+                        help="若设置，则额外导出仅包含漏标注样本的独立验证包（含 HTML ）")
+    parser.add_argument("--verified-bundle-dir", default="verified_bundle",
+                        help="漏标注验证包保存子目录，默认 verified_bundle")
+    parser.add_argument("--verified-bundle-title", default="漏标注核对报告",
+                        help="漏标注验证包 HTML 标题")
 
     return parser.parse_args()
 
@@ -204,7 +222,8 @@ def _safe_float(value: Any) -> Optional[float]:
 def evaluate_image(predictions: List[PredictionRecord],
                    annotations: List[AnnotationRecord],
                    iou_threshold: float,
-                   match_mode: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+                   match_mode: str,
+                   verified_threshold: float) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     pred_data = [pred.to_dict() for pred in predictions]
     gt_data = [ann.to_dict() for ann in annotations]
     allow_multi = (match_mode == "multi")
@@ -216,6 +235,7 @@ def evaluate_image(predictions: List[PredictionRecord],
         pred["iou"] = 0.0
         pred["best_iou"] = 0.0
         pred["best_gt_index"] = None
+        pred["unlabeled_score"] = None
 
     for gt in gt_data:
         gt["matches"] = []
@@ -309,6 +329,7 @@ def evaluate_image(predictions: List[PredictionRecord],
             pred["iou"] = max(pred["iou"], best_iou)
 
     for pred in pred_data:
+        pred["iou"] = pred.get("iou", pred.get("best_iou", 0.0))
         if pred["matches"]:
             if any(m["status"] == STATUS_SUCCESS_CLASS for m in pred["matches"]):
                 pred_status = STATUS_SUCCESS_CLASS
@@ -317,10 +338,19 @@ def evaluate_image(predictions: List[PredictionRecord],
             pred["status"] = pred_status
             status_counter[pred_status] += 1
         else:
-            pred["status"] = STATUS_FALSE
             pred["matched_gt"] = None
-            status_counter[STATUS_FALSE] += 1
-        pred["iou"] = pred.get("iou", pred.get("best_iou", 0.0))
+            confidence = pred.get("confidence")
+            best_iou = pred.get("best_iou") or 0.0
+            score = None
+            if confidence is not None:
+                score = (1.0 - float(best_iou)) * float(confidence)
+                pred["unlabeled_score"] = score
+            if score is not None and score >= verified_threshold:
+                pred["status"] = STATUS_UNLABELED
+                status_counter[STATUS_UNLABELED] += 1
+            else:
+                pred["status"] = STATUS_FALSE
+                status_counter[STATUS_FALSE] += 1
 
     total_preds = len(pred_data)
     total_gt = len(gt_data)
@@ -337,6 +367,7 @@ def evaluate_image(predictions: List[PredictionRecord],
             STATUS_SUCCESS_CLASS: status_counter[STATUS_SUCCESS_CLASS],
             STATUS_SUCCESS_DETECT: status_counter[STATUS_SUCCESS_DETECT],
             STATUS_FALSE: status_counter[STATUS_FALSE],
+            STATUS_UNLABELED: status_counter[STATUS_UNLABELED],
             STATUS_MISSED: status_counter[STATUS_MISSED]
         }
     }
@@ -561,6 +592,139 @@ def copy_image(image_path: Path, relative_path: Path, media_root: Path) -> Path:
     return target_path
 
 
+def copy_relative_artifact(src_root: Path, relative_path: Optional[str], dst_root: Path) -> bool:
+    if not relative_path:
+        return False
+    rel_path = Path(relative_path)
+    if rel_path.is_absolute():
+        rel_path = Path(rel_path.name)
+    src_path = src_root / rel_path
+    if not src_path.exists():
+        print(f"[警告] 无法在 {src_path} 找到文件，跳过复制至漏标注包")
+        return False
+    target_path = dst_root / rel_path
+    ensure_dir(target_path.parent)
+    shutil.copy2(src_path, target_path)
+    return True
+
+
+def build_verified_summary(entries: List[Dict[str, Any]],
+                           base_config: Dict[str, Any]) -> Dict[str, Any]:
+    counts_total = Counter()
+    for entry in entries:
+        counts = entry.get("status_counts") or {}
+        counts_total["predictions"] += counts.get("predictions", 0)
+        counts_total["ground_truth"] += counts.get("ground_truth", 0)
+        counts_total[STATUS_SUCCESS_CLASS] += counts.get(STATUS_SUCCESS_CLASS, 0)
+        counts_total[STATUS_SUCCESS_DETECT] += counts.get(STATUS_SUCCESS_DETECT, 0)
+        counts_total[STATUS_FALSE] += counts.get(STATUS_FALSE, 0)
+        counts_total[STATUS_UNLABELED] += counts.get(STATUS_UNLABELED, 0)
+        counts_total[STATUS_MISSED] += counts.get(STATUS_MISSED, 0)
+
+    total_pred = counts_total["predictions"]
+    total_gt = counts_total["ground_truth"]
+    success_class = counts_total[STATUS_SUCCESS_CLASS]
+    success_detect = counts_total[STATUS_SUCCESS_DETECT]
+    detected_total = success_class + success_detect
+
+    precision = (detected_total / total_pred) if total_pred > 0 else None
+    recall = (detected_total / total_gt) if total_gt > 0 else None
+    classification_accuracy = (success_class / detected_total) if detected_total > 0 else None
+
+    config_copy = dict(base_config or {})
+    config_copy["bundle_size"] = len(entries)
+
+    overall = {
+        "defect_precision": precision,
+        "defect_recall": recall,
+        "classification_accuracy": classification_accuracy,
+        "counts": {
+            "predictions": total_pred,
+            "ground_truth": total_gt,
+            STATUS_SUCCESS_CLASS: success_class,
+            STATUS_SUCCESS_DETECT: success_detect,
+            STATUS_FALSE: counts_total[STATUS_FALSE],
+            STATUS_UNLABELED: counts_total[STATUS_UNLABELED],
+            STATUS_MISSED: counts_total[STATUS_MISSED]
+        },
+        "verified_images": len(entries)
+    }
+
+    return {
+        "config": config_copy,
+        "overall": overall,
+        "per_class": []
+    }
+
+
+def generate_verified_report(bundle_dir: Path, title: str):
+    html_path = bundle_dir / "report.html"
+    vis_script = SCRIPT_DIR / "visualize_validation_results.py"
+    cmd = [
+        sys.executable,
+        str(vis_script),
+        "--validation-dir", str(bundle_dir),
+        "--output-html", str(html_path),
+        "--title", title
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        print(f"[警告] 生成漏标注报告失败：{exc}")
+
+
+def export_verified_bundle(output_dir: Path,
+                           manifest: List[Dict[str, Any]],
+                           summary: Dict[str, Any],
+                           bundle_dir: Path,
+                           title: str):
+    verified_entries: List[Dict[str, Any]] = []
+    for item in manifest:
+        counts = item.get("status_counts") or {}
+        if counts.get(STATUS_UNLABELED, 0) <= 0:
+            continue
+        entry_copy = json.loads(json.dumps(item, ensure_ascii=False))
+        if not entry_copy.get("copied_image_path") and entry_copy.get("verified_image_path"):
+            entry_copy["copied_image_path"] = entry_copy["verified_image_path"]
+        verified_entries.append(entry_copy)
+
+    if not verified_entries:
+        print("ℹ️ 未检测到漏标注样本，跳过 verified bundle 导出。")
+        return
+
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir)
+    ensure_dir(bundle_dir)
+
+    copied_paths = set()
+    for entry in verified_entries:
+        rel_paths = {
+            entry.get("detail_path"),
+            entry.get("overlay_path"),
+            entry.get("copied_image_path"),
+            entry.get("verified_image_path"),
+        }
+        for rel_path in rel_paths:
+            if rel_path and rel_path not in copied_paths:
+                if copy_relative_artifact(output_dir, rel_path, bundle_dir):
+                    copied_paths.add(rel_path)
+
+    manifest_path = bundle_dir / "data" / "manifest.json"
+    ensure_dir(manifest_path.parent)
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({"images": verified_entries}, f, ensure_ascii=False, indent=2)
+
+    bundle_summary = build_verified_summary(verified_entries, summary.get("config"))
+    bundle_summary["config"]["bundle_dir"] = str(bundle_dir)
+    bundle_summary["config"]["bundle_source"] = str(output_dir)
+    summary_path = bundle_dir / "metrics_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(bundle_summary, f, ensure_ascii=False, indent=2)
+
+    generate_verified_report(bundle_dir, title)
+    print(f"✅ 已生成漏标注验证包：{bundle_dir}")
+
+
 def relative_image_path(image_path: Path, image_root: Path) -> Path:
     if image_path.is_relative_to(image_root):
         return image_path.relative_to(image_root)
@@ -569,6 +733,9 @@ def relative_image_path(image_path: Path, image_root: Path) -> Path:
 
 def main():
     args = parse_args()
+    if not args.verified_image_dir:
+        args.verified_image_dir = args.legacy_verified_dir or "verified_image"
+    delattr(args, "legacy_verified_dir")
     configure_matplotlib_font(args.font_path)
     inference_path = Path(args.inference_json)
     output_dir = Path(args.output_dir)
@@ -578,6 +745,8 @@ def main():
     temp_dir = output_dir / "temp"
     ensure_dir(details_dir)
     ensure_dir(temp_dir)
+    verified_image_dir = output_dir / args.verified_image_dir
+    ensure_dir(verified_image_dir)
     image_root = Path(args.image_root)
 
     if args.label_format == "labelme" and not args.label_root:
@@ -608,6 +777,7 @@ def main():
     global_success_class = 0
     global_success_detect = 0
     class_stats: Dict[str, Dict[str, int]] = {}
+    verified_samples = 0
 
     for image_result in tqdm(results, desc="验证中"):
         image_path = Path(image_result.get("image_path", ""))
@@ -629,7 +799,13 @@ def main():
             continue
 
         annotations = annotation_loader.load(image_path)
-        eval_data, metrics = evaluate_image(predictions, annotations, args.iou_threshold, args.match_mode)
+        eval_data, metrics = evaluate_image(
+            predictions,
+            annotations,
+            args.iou_threshold,
+            args.match_mode,
+            args.verified_threshold
+        )
 
         overlay = draw_overlay(image, eval_data, font_renderer)
         overlay_slug = rel_path.as_posix().replace('/', '_') or image_path.stem
@@ -641,6 +817,13 @@ def main():
         copied_image_path = None
         if args.copy_images:
             copied_image_path = copy_image(image_path, rel_path, media_dir)
+
+        has_unlabeled = any(pred.get("status") == STATUS_UNLABELED for pred in eval_data["predictions"])
+        verified_image_rel = None
+        if has_unlabeled:
+            verified_abs = copy_image(image_path, rel_path, verified_image_dir)
+            verified_image_rel = verified_abs.relative_to(output_dir).as_posix()
+            verified_samples += 1
 
         detail_payload = {
             "image_path": str(image_path),
@@ -654,6 +837,7 @@ def main():
             "metrics": metrics,
             "predictions": eval_data["predictions"],
             "annotations": eval_data["annotations"],
+            "verified_image_path": verified_image_rel,
         }
 
         detail_file = details_dir / f"{overlay_slug}.json"
@@ -666,6 +850,7 @@ def main():
             "detail_path": detail_file.relative_to(output_dir).as_posix(),
             "overlay_path": overlay_path.relative_to(output_dir).as_posix(),
             "copied_image_path": detail_payload["copied_image_path"],
+            "verified_image_path": verified_image_rel,
             "metrics": metrics,
             "status_counts": metrics.get("counts", {})
         })
@@ -690,6 +875,8 @@ def main():
             "coco_json": str(args.coco_json) if args.coco_json else None,
             "iou_threshold": args.iou_threshold,
             "copy_images": args.copy_images,
+            "verified_threshold": args.verified_threshold,
+            "verified_image_dir": str(verified_image_dir),
         },
         "overall": {
             "defect_precision": (detected_total / total_pred) if total_pred > 0 else None,
@@ -701,11 +888,13 @@ def main():
                 STATUS_SUCCESS_CLASS: global_success_class,
                 STATUS_SUCCESS_DETECT: global_success_detect,
                 STATUS_FALSE: global_counts.get(STATUS_FALSE, 0),
+                STATUS_UNLABELED: global_counts.get(STATUS_UNLABELED, 0),
                 STATUS_MISSED: global_counts.get(STATUS_MISSED, 0)
             }
         },
         "per_class": per_class_metrics
     }
+    summary["overall"]["verified_images"] = verified_samples
     plot_path = plot_per_class_metrics(per_class_metrics, output_dir, summary["overall"])
     if plot_path:
         summary["per_class_plot"] = Path(plot_path).relative_to(output_dir).as_posix()
@@ -717,6 +906,16 @@ def main():
     summary_path = output_dir / "metrics_summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    if args.export_verified_bundle:
+        bundle_dir = output_dir / args.verified_bundle_dir
+        export_verified_bundle(
+            output_dir,
+            manifest,
+            summary,
+            bundle_dir,
+            args.verified_bundle_title
+        )
 
     print("\n验证完成。")
     if summary["overall"]["defect_precision"] is not None:

@@ -7,7 +7,7 @@ from typing import Any, Dict
 
 import mlflow
 
-from rfdetr import RFDETRBase, RFDETRLarge, RFDETRSegPreview
+from rfdetr import RFDETRBase, RFDETRLarge, RFDETRSegPreview,RFDETRMedium
 
 CLASS_NAMES = [
     "其他",
@@ -20,18 +20,18 @@ CLASS_NAMES = [
     "裂纹"
 ]
 
-model = RFDETRLarge()
+model = RFDETRBase()
 
 DEFAULT_TRAINING_ARGS = {
-    "dataset_dir": "/datasets/PAR/Xray/self/1120/labeled/roi2_merge/ROI_rotate_slice3_det_coco",
+    "dataset_dir": "/datasets/PAR/Xray/self/1208/roi3_1215/coco_merged",
     "epochs": 500,
     "batch_size": 2,
     "grad_accum_steps": 8,
     "lr": 1e-4,
-    "output_dir": "./runs/1208/detrlarge",
+    "output_dir": "/datasets/PAR/detr_runs/1230/detrmedium",
     "early_stopping": True,
-    "run": "1120data_res840_train2",  # mlflow 的 run name
-    # "resume" : "runs/1208/detrlarge/SWRD_patch640_res560/checkpoint_best_regular.pth",
+    "run": "patch_resume",  # mlflow 的 run name
+    "resume" : "/datasets/PAR/detr_runs/1230/detrmedium/merge_patch/checkpoint_best_total.pth",
     "resolution": 840,
     # "lr_scheduler": "cosine",
     # "warmup_epochs": 5,
@@ -243,6 +243,6 @@ with _log_terminal_output(log_file_path):
             # warmup_epochs=training_args["warmup_epochs"],
             # lr_min_factor=training_args["lr_min_factor"],
             class_names=training_args["class_names"],
-            num_classes=training_args["num_classes"]
-            # resume = training_args["resume"],
+            num_classes=training_args["num_classes"],
+            resume = training_args["resume"],
         )

@@ -17,12 +17,14 @@ import cv2
 STATUS_SUCCESS_CLASS = "成功分类"
 STATUS_SUCCESS_DETECT = "成功检出"
 STATUS_MISSED = "漏检"
+STATUS_UNLABELED = "漏标注"
 STATUS_FALSE = "误检"
 
 STATUS_ORDER = [
     STATUS_SUCCESS_CLASS,
     STATUS_SUCCESS_DETECT,
     STATUS_MISSED,
+    STATUS_UNLABELED,
     STATUS_FALSE,
 ]
 
@@ -30,6 +32,7 @@ STATUS_COLORS = {
     STATUS_SUCCESS_CLASS: "#2ecc71",
     STATUS_SUCCESS_DETECT: "#ffa500",
     STATUS_MISSED: "#ff0000",
+    STATUS_UNLABELED: "#f4c542",
     STATUS_FALSE: "#8e44ad",
 }
 
@@ -114,7 +117,7 @@ def build_entries(validation_dir: Path,
             "width": detail.get("width"),
             "height": detail.get("height"),
             "image_basename": Path(detail.get("relative_image_path", "")).name,
-            "image_basename": Path(detail.get("relative_image_path", "")).name,
+            "verified_image_path": item.get("verified_image_path"),
         })
     return entries
 
@@ -477,7 +480,8 @@ const STATUS_ORDER = VIS_DATA.status_order;
 const STATUS_SUCCESS_CLASS = STATUS_ORDER[0];
 const STATUS_SUCCESS_DETECT = STATUS_ORDER[1];
 const STATUS_MISSED = STATUS_ORDER[2];
-const STATUS_FALSE = STATUS_ORDER[3];
+const STATUS_UNLABELED = STATUS_ORDER[3];
+const STATUS_FALSE = STATUS_ORDER[4];
 const POLYGON_FILL_ALPHA = 0.35;
 
 const state = {
@@ -534,6 +538,12 @@ function initGlobalMetrics() {
     const counts = overall.counts;
     metrics.push(`预测数: ${counts.predictions || 0}`);
     metrics.push(`标注数: ${counts.ground_truth || 0}`);
+    if ((counts[STATUS_UNLABELED] || 0) > 0) {
+      metrics.push(`漏标注候选: ${counts[STATUS_UNLABELED]}`);
+    }
+  }
+  if (overall.verified_images) {
+    metrics.push(`漏标注图像: ${overall.verified_images}`);
   }
   metricsBox.innerHTML = metrics.map(m => `<div class="metrics-line">${m}</div>`).join('');
 }
@@ -666,7 +676,9 @@ function createCardShell(entry) {
   const precision = entry.metrics && entry.metrics.defect_precision != null ? (entry.metrics.defect_precision * 100).toFixed(1) : 'N/A';
   const recall = entry.metrics && entry.metrics.defect_recall != null ? (entry.metrics.defect_recall * 100).toFixed(1) : 'N/A';
   const clsAcc = entry.metrics && entry.metrics.classification_accuracy != null ? (entry.metrics.classification_accuracy * 100).toFixed(1) : 'N/A';
-  metricLine.innerHTML = `命中: ${detected}/${counts.ground_truth || 0} · 精确率: ${precision}% · 召回率: ${recall}% · 分类准确率: ${clsAcc}%`;
+  const unlabeled = counts[STATUS_UNLABELED] || 0;
+  const unlabeledText = ` · 漏标注: ${unlabeled}`;
+  metricLine.innerHTML = `命中: ${detected}/${counts.ground_truth || 0} · 精确率: ${precision}% · 召回率: ${recall}% · 分类准确率: ${clsAcc}%${unlabeledText}`;
   header.appendChild(metricLine);
   card.appendChild(header);
 
