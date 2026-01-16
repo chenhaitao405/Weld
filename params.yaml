@@ -1,0 +1,16 @@
+data:
+  tag: "crack_v1"
+  raw_dir: datasets/crack/crack
+  yolo_dir: data/processed/crack_yolo
+  val_size: 0.1
+
+train:
+  epochs: 200
+  imgsz: 640
+  batch: 8
+  lr: 0.001
+  output_dir: outputs/welddetect
+  run: crack_baseline
+  model: yolo11l.pt
+  pretrained: true
+  degrees: 180

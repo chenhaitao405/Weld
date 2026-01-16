@@ -1,0 +1,44 @@
+stages:
+  preprocess_crack:
+    cmd: >-
+      python convert/labelme2yolo.py
+      --json_dir ${data.raw_dir}
+      --image_dir ${data.raw_dir}
+      --val_size ${data.val_size}
+      --output_dir ${data.yolo_dir}
+    deps:
+      - convert/labelme2yolo.py
+      - ${data.raw_dir}
+    params:
+      - data.raw_dir
+      - data.val_size
+      - data.yolo_dir
+      - data.tag
+    outs:
+      - ${data.yolo_dir}:
+          cache: false
+
+  train_welddetect:
+    cmd: >-
+      python train/welddetect.py
+      --data ${data.yolo_dir}/dataset.yaml
+      --epochs ${train.epochs}
+      --imgsz ${train.imgsz}
+      --batch ${train.batch}
+      --lr ${train.lr}
+      --output-dir ${train.output_dir}
+      --run ${train.run}
+      --model ${train.model}
+      --pretrained ${train.pretrained}
+      --degrees ${train.degrees}
+    deps:
+      - train/welddetect.py
+      - ${data.yolo_dir}
+    params:
+      - train
+      - data.tag
+    outs:
+      - ${train.output_dir}:
+          cache: false
+    metrics:
+      - metrics/welddetect.json

@@ -1,0 +1,28 @@
+schema: '2.0'
+stages:
+  preprocess_crack:
+    cmd: python convert/labelme2yolo.py --json_dir datasets/crack/crack 
+      --image_dir datasets/crack/crack --val_size 0.1 --output_dir 
+      data/processed/crack_yolo
+    deps:
+    - path: convert/labelme2yolo.py
+      hash: md5
+      md5: d9f6957586d48becd4cc2dd804c7ebf5
+      size: 24585
+    - path: datasets/crack/crack
+      hash: md5
+      md5: c2459b620544478dcb4a2d0f9da007be.dir
+      size: 3623680667
+      nfiles: 1125
+    params:
+      params.yaml:
+        data.raw_dir: datasets/crack/crack
+        data.tag: crack_v1
+        data.val_size: 0.1
+        data.yolo_dir: data/processed/crack_yolo
+    outs:
+    - path: data/processed/crack_yolo
+      hash: md5
+      md5: 3925e0eeb6fb0b1e8a78713faf5ee3fb.dir
+      size: 2452986172
+      nfiles: 1125

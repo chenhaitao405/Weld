@@ -152,3 +152,28 @@ python run_full_pipeline.py \
 - `run_full_pipeline.py` 要求 `run_inference_pipeline.py` 能在当前工作目录直接调用；若脚本位于其他位置，请在命令前加 `python path/to/run_inference_pipeline.py` 或使用虚拟环境确保可执行。
 - 验证输出目录会额外生成 `verified_image/` 子目录，用于留存所有“漏标注”原图；若启用 `--export-verified-bundle`，还会生成 `verified_bundle/`，其中只包含需回传客户的样本及 `report.html`。
 - 使用 MLflow 时请预先安装并配置 Tracking Server，否则会提示未安装或无法连接。
+
+## DVC 实验流程（焊缝检测最小闭环）
+
+以下流程演示 “Labelme → YOLO → 训练” 的 DVC 实验管理方式，配套 `dvc.yaml` 与 `params.yaml` 使用。
+
+```bash
+# 1) 切换数据版本（示例：用 git tag 切换 datasets/crack.dvc）
+git checkout <tag> -- datasets/crack.dvc
+dvc checkout
+
+# 2) 运行完整实验（预处理 + 训练）
+dvc exp run
+
+# 3) 修改参数再跑一次（示例）
+dvc exp run -S data.val_size=0.2 -S train.epochs=300 -S train.lr=0.0005
+
+# 4) 对比实验
+dvc exp show
+```
+
+产物说明：
+- 预处理输出：`data/processed/crack_yolo`（不进 DVC cache）
+- 训练输出：`outputs/welddetect/<run>`（只保留 best 权重）
+- 指标文件：`metrics/welddetect.json`（由 DVC 追踪）
+- MLflow 记录：`mlruns/`

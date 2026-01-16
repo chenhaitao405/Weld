@@ -10,6 +10,7 @@
 *.pyc
 *.pt
 *.pth
+/data/processed
 /outputs
 /outputs
 /mlruns
