@@ -52,24 +52,35 @@ def main() -> int:
         print(f"No JSON files found in {src_dir}")
         return 0
 
+    # Use existing destination folders as prefix candidates to avoid splitting wrong.
+    # Example: "6-1_8bit_TK6-..." should map to prefix "6-1_8bit" (not "6-1").
+    prefix_candidates = [
+        p.name for p in dst_root.iterdir()
+        if p.is_dir()
+    ]
+    prefix_candidates.sort(key=len, reverse=True)
+
     moved = 0
     skipped = 0
     errors = 0
 
     for src in files:
         stem = src.stem
-        if "_" not in stem:
-            print(f"[skip] no underscore in filename: {src.name}")
+        matched_prefix = None
+        rest = None
+        for prefix in prefix_candidates:
+            prefix_tag = f"{prefix}_"
+            if stem.startswith(prefix_tag):
+                matched_prefix = prefix
+                rest = stem[len(prefix_tag):]
+                break
+
+        if matched_prefix is None or not rest:
+            print(f"[skip] no matching prefix folder for: {src.name}")
             skipped += 1
             continue
 
-        prefix, rest = stem.split("_", 1)
-        if not rest:
-            print(f"[skip] empty filename after prefix: {src.name}")
-            skipped += 1
-            continue
-
-        dst_dir = dst_root / prefix
+        dst_dir = dst_root / matched_prefix / "label"
         dst_dir.mkdir(parents=True, exist_ok=True)
         dst = dst_dir / f"{rest}{src.suffix}"
 
