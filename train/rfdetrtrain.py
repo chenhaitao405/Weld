@@ -20,17 +20,17 @@ CLASS_NAMES = [
     "裂纹"
 ]
 
-model = RFDETRLarge()
+model = RFDETRMedium()
 
 DEFAULT_TRAINING_ARGS = {
-    "dataset_dir": "../outputs/pipeline_pair_1120_1208/coco_from_patch",
+    "dataset_dir": "/datasets/PAR/Xray/opensource/SWRD8bit/swr_pipeline/coco_from_patch_det_slice3",
     "epochs": 500,
-    "batch_size": 2,
+    "batch_size": 8,
     "grad_accum_steps": 8,
     "lr": 1e-4,
-    "output_dir": "/datasets/PAR/detr_runs/0116/detrlarge",
+    "output_dir": "/datasets/PAR/detr_runs/0116/detrmedium",
     "early_stopping": True,
-    "run": "large_patch_resume",  # mlflow 的 run name
+    "run": "SWRD_patch",  # mlflow 的 run name
     "resume" : "/datasets/PAR/detr_runs/1230/detrlarge/patch640_ratio_1/checkpoint_best_regular.pth",
     "resolution": 840,
     # "lr_scheduler": "cosine",
@@ -244,5 +244,5 @@ with _log_terminal_output(log_file_path):
             # lr_min_factor=training_args["lr_min_factor"],
             class_names=training_args["class_names"],
             num_classes=training_args["num_classes"],
-            resume = training_args["resume"],
+            # resume = training_args["resume"],
         )

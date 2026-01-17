@@ -379,7 +379,7 @@ class RFDetrDetectionConfig:
 @dataclass
 class WideSliceConfig:
     enabled: bool = False
-    aspect_ratio_threshold: float = 4.0
+    aspect_ratio_threshold: float = 3.0
     window_ratio: float = 2.0
     overlap: float = 0.3
     target_size: int = 1120
