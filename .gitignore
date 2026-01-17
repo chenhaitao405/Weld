@@ -16,3 +16,4 @@
 /mlruns
 /train/outputs
 *.zip
+/data

@@ -752,6 +752,8 @@ def main():
                         help='平衡数据集')
     parser.add_argument('--balance_ratio', type=float, default=1.0,
                         help='平衡比例（无缺陷/有缺陷），默认1.0')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='随机种子（用于可复现控制）')
 
     args = parser.parse_args()
 
@@ -759,6 +761,9 @@ def main():
     if args.no_slice:
         print("提示: --no_slice 已弃用，等价于 --slice_mode 1")
         slice_mode = 1
+
+    if args.seed is not None:
+        random.seed(int(args.seed))
 
     window_size = tuple(args.window_size) if args.window_size else None
     if slice_mode != 2 and window_size is not None:

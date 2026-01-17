@@ -380,7 +380,7 @@ class Labelme2YOLO:
 
         return str(dst_img_path)
 
-    def convert(self, val_size):
+    def convert(self, val_size, seed=None):
         """执行转换"""
         # 获取所有JSON文件
         json_names = [f for f in os.listdir(self._json_dir)
@@ -393,7 +393,8 @@ class Labelme2YOLO:
         print(f"\n找到 {len(json_names)} 个JSON文件")
 
         # 划分训练集和验证集
-        train_json_names, val_json_names = train_val_split(json_names, val_size)
+        split_seed = 42 if seed is None else int(seed)
+        train_json_names, val_json_names = train_val_split(json_names, val_size, random_seed=split_seed)
 
         print(f"训练集: {len(train_json_names)} 个文件")
         print(f"验证集: {len(val_json_names)} 个文件")
@@ -599,6 +600,8 @@ def main():
                         help='预定义的标签映射（JSON格式字符串，批处理用）')
     parser.add_argument('--no_prefix', action='store_true',
                         help='不添加目录前缀到文件名')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='随机种子（用于训练/验证集划分）')
 
     args = parser.parse_args()
 
@@ -630,7 +633,7 @@ def main():
     )
 
     # 执行转换
-    converter.convert(val_size=args.val_size)
+    converter.convert(val_size=args.val_size, seed=args.seed)
 
 
 if __name__ == '__main__':

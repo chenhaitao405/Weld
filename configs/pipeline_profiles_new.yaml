@@ -5,19 +5,12 @@ profiles:
     platform: Linux
     description: 以 datasets/images 与 datasets/labels 配对的预处理配置示例
     paths:
-      base_path: /datasets/PAR/Weld
-      output_base_dir: outputs/pipeline_pair_1120_1208
-    dataset_pairs:
-      - image_root: datasets/images/1120
-        label_root: datasets/labels/1120
-      - image_root: datasets/images/1208
-        label_root: datasets/labels/1208
+      base_path: .
+      output_base_dir: data/pipeline_pair_1120_1208
+      reference_label_map_path: datasets/label_id_map.yaml
     outputs:
       yolo_dir: yolo
-      roi_dir: ROI
       roi_rotate: ROI_rotate
-      patch_dir: patch_640
-      cls_dir: patch_det
       coco_dir: coco_from_patch
       merged_coco_dir: coco_merged
     params:

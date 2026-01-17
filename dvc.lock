@@ -26,3 +26,81 @@ stages:
       md5: 3925e0eeb6fb0b1e8a78713faf5ee3fb.dir
       size: 2452986172
       nfiles: 1125
+  preprocess_all:
+    cmd: python run_data_pipeline.py --config-path 
+      configs/pipeline_profiles_new.yaml --profile pair_1120_1208 --params-path 
+      params.yaml --steps 123456 --seed 42
+    deps:
+    - path: configs/pipeline_profiles_new.yaml
+      hash: md5
+      md5: d3372d9e245001a144fb0fc04125d562
+      size: 1469
+    - path: datasets/images
+      hash: md5
+      md5: 72ef397db917831a1df2c8d87ad87a7f.dir
+      size: 8675689056
+      nfiles: 2451
+    - path: datasets/labels
+      hash: md5
+      md5: 0a77f32fe82b0f50601977411e35837b.dir
+      size: 2178408675
+      nfiles: 1071
+    - path: params.yaml
+      hash: md5
+      md5: 8b22bc8e2ce41a64e6f07693035d2c7a
+      size: 1147
+    - path: run_data_pipeline.py
+      hash: md5
+      md5: 2191255a81c494ba29d1d012ab88c2da
+      size: 38011
+    params:
+      params.yaml:
+        preprocess:
+          profile: pair_1120_1208
+          seed: 42
+          output_base_dir: data/pipeline_pair_1120_1208_test
+          steps: 123456
+          dataset_pairs:
+          - image_root: datasets/images/1120
+            label_root: datasets/labels/1120
+          - image_root: datasets/images/1208
+            label_root: datasets/labels/1208
+          labelme2yolo:
+            seg: true
+            unify_to_crack: false
+          yolo_roi_extractor:
+            model_path: ./model/weldROI4.pt
+            roi_conf: 0.25
+            roi_iou: 0.45
+            padding: 0.1
+            mode: seg
+          patchandenhance:
+            overlap: 0.7
+            enhance_mode: windowing
+            slice_mode: 3
+            window_size:
+            - 640
+            - 640
+            label_mode: seg
+          seg2det:
+            mode: det
+            balance_data: false
+            balance_ratio: 1.0
+          yolo2coco:
+            task: det
+            test_split_ratio: 0.05
+            split_seed: 42
+          merge_coco:
+            dataset_b: roi2_merge/coco_det
+            splits:
+            - train
+            - valid
+            - test
+            merge_ratio:
+            - 1.0
+    outs:
+    - path: data/pipeline_pair_1120_1208_test
+      hash: md5
+      md5: c62ce0f3ca9bbc0ba54d9d2c945b28db.dir
+      size: 8395730975
+      nfiles: 18172

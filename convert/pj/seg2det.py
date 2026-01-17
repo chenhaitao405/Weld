@@ -51,7 +51,8 @@ class YOLOFormatConverter:
     """YOLO格式转换器"""
 
     def __init__(self, input_dir: str, output_dir: str, mode: str = 'det',
-                 balance_data: bool = False, balance_ratio: float = 1.0):
+                 balance_data: bool = False, balance_ratio: float = 1.0,
+                 seed: Optional[int] = None):
         """
         初始化转换器
 
@@ -67,6 +68,7 @@ class YOLOFormatConverter:
         self.mode = mode
         self.balance_data = balance_data
         self.balance_ratio = float(balance_ratio)
+        self.seed = seed
 
         # 验证输入目录
         if not self.input_dir.exists():
@@ -395,7 +397,7 @@ class YOLOFormatConverter:
         desired_neg = int(round(pos_count * self.balance_ratio))
         desired_neg = max(0, desired_neg)
 
-        rng = random.Random(42)
+        rng = random.Random(self.seed if self.seed is not None else 42)
         removed_pos = removed_neg = 0
 
         if neg_count > desired_neg:
@@ -560,7 +562,7 @@ class YOLOFormatConverter:
             print(f"  ⚖️ 数据平衡: {split} 已平衡，各类别均为 {min_count} 张。")
             return
 
-        rng = random.Random(42)
+        rng = random.Random(self.seed if self.seed is not None else 42)
         removed_total = 0
         for class_dir, files in class_files.items():
             if len(files) <= min_count:
@@ -671,6 +673,8 @@ def main():
                         help='启用数据平衡（检测模式按指定比例，分类模式下类别对齐）')
     parser.add_argument('--balance_ratio', type=float, default=1.0,
                         help='检测数据平衡时的负/正目标比例，例如0.5表示负样本数量为正样本的0.5倍')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='随机种子（用于数据平衡抽样）')
 
     args = parser.parse_args()
 
@@ -680,7 +684,8 @@ def main():
         output_dir=args.output_dir,
         mode=args.mode,
         balance_data=args.balance_data,
-        balance_ratio=args.balance_ratio
+        balance_ratio=args.balance_ratio,
+        seed=args.seed
     )
 
     # 根据模式执行转换

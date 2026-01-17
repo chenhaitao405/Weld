@@ -17,6 +17,7 @@ import yaml
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_PATH = os.path.join(CURRENT_DIR, "configs", "pipeline_profiles_new.yaml")
+DEFAULT_PARAMS_PATH = os.path.join(CURRENT_DIR, "params.yaml")
 
 CONFIG_PATH = DEFAULT_CONFIG_PATH
 ACTIVE_PROFILE_NAME = None
@@ -29,11 +30,13 @@ DATASET_PAIRS: List[Dict[str, str]] = []
 DATASET_ITEMS: List[Dict[str, str]] = []
 OUTPUT_CONFIG: Dict[str, str] = {}
 INTERMEDIATE_OUTPUTS: Dict[str, str] = {}
+OUTPUTS_SECTION_RAW: Dict[str, str] = {}
+PARAM_LOG_PATH_RAW = ""
 FIXED_PARAMS: Dict[str, Dict] = {}
 PARAM_LOG_PATH = ""
 PARAM_LOG: Dict = {}
 PIPELINE_SEED = None
-KEEP_INTERMEDIATE = False
+PENDING_DATASET_PAIRS: List[Dict[str, str]] = []
 
 def _ensure_log_dir():
     if not PARAM_LOG_PATH:
@@ -112,6 +115,61 @@ def resolve_path(path_value: str, base_dir: str = None) -> str:
         return os.path.abspath(os.path.join(base_dir, expanded))
 
     return os.path.abspath(expanded)
+
+
+def _deep_update(base: Dict, updates: Dict) -> Dict:
+    """递归合并字典，updates 覆盖 base。"""
+    merged = copy.deepcopy(base)
+    for key, value in (updates or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_update(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def load_params_config(params_path: str) -> Dict:
+    """读取 params.yaml（可选）"""
+    if not params_path:
+        return {}
+    params_path = resolve_path(params_path, os.getcwd())
+    if not os.path.exists(params_path):
+        print(f"⚠️ 警告：未找到 params 配置文件 {params_path}，将使用 profile 中的参数")
+        return {}
+    with open(params_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        print(f"⚠️ 警告：params 配置格式异常，期望字典结构：{params_path}")
+        return {}
+    data["__params_path__"] = params_path
+    return data
+
+
+def extract_preprocess_overrides(params_data: Dict) -> Dict:
+    """从 params.yaml 提取预处理参数覆盖项。"""
+    preprocess_cfg = params_data.get("preprocess") or params_data.get("pipeline") or {}
+    if not isinstance(preprocess_cfg, dict):
+        return {}
+
+    overrides = copy.deepcopy(preprocess_cfg.get("params") or {})
+    step_keys = [
+        "labelme2yolo",
+        "yolo_roi_extractor",
+        "rotate_yolo",
+        "patchandenhance",
+        "seg2det",
+        "yolo2coco",
+        "merge_coco",
+    ]
+    for key in step_keys:
+        if key in preprocess_cfg:
+            value = preprocess_cfg.get(key)
+            if value is not None:
+                overrides[key] = copy.deepcopy(value)
+
+    preprocess_cfg = copy.deepcopy(preprocess_cfg)
+    preprocess_cfg["__overrides__"] = overrides
+    return preprocess_cfg
 
 
 def _normalize_dataset_pairs(raw_pairs: List[Dict[str, str]], base_dir: str) -> List[Dict[str, str]]:
@@ -209,6 +267,36 @@ def _build_dataset_items_from_legacy(datasets: List[str], base_path: str, json_b
     return items
 
 
+def _rebuild_outputs():
+    """根据 OUTPUT_BASE_DIR 与 OUTPUTS_SECTION_RAW 重新生成输出目录配置。"""
+    global OUTPUT_CONFIG, INTERMEDIATE_OUTPUTS, PARAM_LOG_PATH
+
+    if not OUTPUTS_SECTION_RAW:
+        return
+
+    resolved_outputs: Dict[str, str] = {}
+    for key, value in OUTPUTS_SECTION_RAW.items():
+        if value is None:
+            raise ValueError(f"outputs.{key} 为空")
+        resolved_outputs[key] = resolve_path(value, OUTPUT_BASE_DIR)
+    OUTPUT_CONFIG = resolved_outputs
+
+    tmp_root = os.path.join(OUTPUT_BASE_DIR, "_tmp")
+    INTERMEDIATE_OUTPUTS = {
+        "roi_dir": resolve_path(OUTPUTS_SECTION_RAW.get("roi_dir") or "ROI", OUTPUT_BASE_DIR)
+        if "roi_dir" in OUTPUTS_SECTION_RAW else os.path.join(tmp_root, "ROI"),
+        "patch_dir": resolve_path(OUTPUTS_SECTION_RAW.get("patch_dir") or "patch", OUTPUT_BASE_DIR)
+        if "patch_dir" in OUTPUTS_SECTION_RAW else os.path.join(tmp_root, "patch"),
+        "cls_dir": resolve_path(OUTPUTS_SECTION_RAW.get("cls_dir") or "patch_det", OUTPUT_BASE_DIR)
+        if "cls_dir" in OUTPUTS_SECTION_RAW else os.path.join(tmp_root, "patch_det"),
+    }
+
+    if PARAM_LOG_PATH_RAW:
+        PARAM_LOG_PATH = resolve_path(PARAM_LOG_PATH_RAW, OUTPUT_BASE_DIR)
+    else:
+        PARAM_LOG_PATH = os.path.join(OUTPUT_BASE_DIR, "pipeline_params.json")
+
+
 def load_pipeline_profile(config_path: str, requested_profile: str = None) -> str:
     """读取配置文件并应用指定 profile."""
     config_path = resolve_path(config_path or DEFAULT_CONFIG_PATH)
@@ -247,7 +335,8 @@ def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
     """根据 profile 设置全局路径和参数."""
     global CONFIG_PATH, ACTIVE_PROFILE_NAME, BASE_PATH, JSON_BASE_PATH
     global OUTPUT_BASE_DIR, DATASETS, DATASET_PAIRS, DATASET_ITEMS
-    global OUTPUT_CONFIG, INTERMEDIATE_OUTPUTS, FIXED_PARAMS
+    global OUTPUT_CONFIG, INTERMEDIATE_OUTPUTS, OUTPUTS_SECTION_RAW, PARAM_LOG_PATH_RAW
+    global FIXED_PARAMS
     global PARAM_LOG_PATH, PARAM_LOG
     global REFERENCE_LABEL_MAP_PATH
 
@@ -279,7 +368,12 @@ def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
         DATASETS = [item["name"] for item in DATASET_ITEMS]
     else:
         if not json_base_raw:
-            raise ValueError(f"profile {profile_name} 缺少 paths.json_base_path")
+            if PENDING_DATASET_PAIRS:
+                DATASET_PAIRS = []
+                DATASET_ITEMS = []
+                DATASETS = []
+            else:
+                raise ValueError(f"profile {profile_name} 缺少 paths.json_base_path")
         datasets = profile_data.get("datasets") or []
         if not isinstance(datasets, list):
             raise ValueError(f"profile {profile_name} 的 datasets 必须是列表")
@@ -290,28 +384,14 @@ def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
     outputs_section = profile_data.get("outputs") or {}
     if not isinstance(outputs_section, dict) or not outputs_section:
         raise ValueError(f"profile {profile_name} 缺少 outputs 定义")
-    resolved_outputs: Dict[str, str] = {}
-    for key, value in outputs_section.items():
-        if value is None:
-            raise ValueError(f"profile {profile_name} 中 outputs.{key} 为空")
-        resolved_outputs[key] = resolve_path(value, OUTPUT_BASE_DIR)
-    OUTPUT_CONFIG = resolved_outputs
-
-    # 初始化中间输出目录（可选覆盖）
-    tmp_root = os.path.join(OUTPUT_BASE_DIR, "_tmp")
-    INTERMEDIATE_OUTPUTS = {
-        "roi_dir": resolve_path(outputs_section.get("roi_dir") or "ROI", OUTPUT_BASE_DIR)
-        if "roi_dir" in outputs_section else os.path.join(tmp_root, "ROI"),
-        "patch_dir": resolve_path(outputs_section.get("patch_dir") or "patch", OUTPUT_BASE_DIR)
-        if "patch_dir" in outputs_section else os.path.join(tmp_root, "patch"),
-        "cls_dir": resolve_path(outputs_section.get("cls_dir") or "patch_det", OUTPUT_BASE_DIR)
-        if "cls_dir" in outputs_section else os.path.join(tmp_root, "patch_det"),
-    }
+    OUTPUTS_SECTION_RAW = copy.deepcopy(outputs_section)
+    _rebuild_outputs()
 
     FIXED_PARAMS = copy.deepcopy(profile_data.get("params") or {})
 
     param_log_raw = profile_data.get("param_log_path")
-    PARAM_LOG_PATH = resolve_path(param_log_raw, OUTPUT_BASE_DIR) if param_log_raw else os.path.join(OUTPUT_BASE_DIR, "pipeline_params.json")
+    PARAM_LOG_PATH_RAW = param_log_raw or ""
+    _rebuild_outputs()
 
     required_outputs = {info["output"] for info in STEP_INFO.values() if info.get("output")}
     missing_outputs = sorted(key for key in required_outputs if key not in OUTPUT_CONFIG)
@@ -331,6 +411,40 @@ def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
         "selected_steps": [],
         "commands": []
     }
+
+
+def apply_preprocess_overrides(preprocess_cfg: Dict):
+    """使用 params.yaml 覆盖 profile 中的参数。"""
+    global FIXED_PARAMS, REFERENCE_LABEL_MAP_PATH, OUTPUT_BASE_DIR
+    global DATASET_PAIRS, DATASET_ITEMS, DATASETS
+
+    if not preprocess_cfg:
+        return
+
+    overrides = preprocess_cfg.get("__overrides__") or {}
+    if overrides:
+        FIXED_PARAMS = _deep_update(FIXED_PARAMS, overrides)
+
+    override_label_map = preprocess_cfg.get("reference_label_map_path")
+    if override_label_map:
+        REFERENCE_LABEL_MAP_PATH = resolve_path(override_label_map, BASE_PATH)
+
+    override_pairs = preprocess_cfg.get("dataset_pairs")
+    if override_pairs:
+        DATASET_PAIRS = _normalize_dataset_pairs(override_pairs, BASE_PATH)
+        DATASET_ITEMS = _discover_dataset_items_from_pairs(DATASET_PAIRS)
+        DATASETS = [item["name"] for item in DATASET_ITEMS]
+        PARAM_LOG["dataset_pairs"] = list(DATASET_PAIRS)
+        PARAM_LOG["dataset_items"] = list(DATASET_ITEMS)
+        PARAM_LOG["datasets"] = list(DATASETS)
+
+    override_output_base = preprocess_cfg.get("output_base_dir")
+    if override_output_base:
+        output_base = resolve_path(override_output_base, BASE_PATH)
+        if output_base != OUTPUT_BASE_DIR:
+            OUTPUT_BASE_DIR = output_base
+            _rebuild_outputs()
+            PARAM_LOG["output_base_dir"] = OUTPUT_BASE_DIR
 
 # ===========================================================================
 
@@ -399,16 +513,17 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        '--keep-intermediate',
-        action='store_true',
-        help='保留中间产物目录（默认清理 ROI/patch/cls 等中间输出）'
-    )
-
-    parser.add_argument(
         '--config-path',
         type=str,
         default=DEFAULT_CONFIG_PATH,
         help=f'配置文件路径 (默认: {DEFAULT_CONFIG_PATH})'
+    )
+
+    parser.add_argument(
+        '--params-path',
+        type=str,
+        default=DEFAULT_PARAMS_PATH,
+        help=f'参数文件路径 (默认: {DEFAULT_PARAMS_PATH})'
     )
 
     parser.add_argument(
@@ -622,23 +737,6 @@ def run_command(command: List[str], step_name: str, param_key: str = None,
         sys.exit(1)
 
 
-def cleanup_intermediate_outputs():
-    """清理中间产物目录（仅限 OUTPUT_BASE_DIR 下的 _tmp 或显式中间目录）"""
-    if KEEP_INTERMEDIATE:
-        return
-
-    output_root = os.path.abspath(OUTPUT_BASE_DIR)
-    for key, path in INTERMEDIATE_OUTPUTS.items():
-        if not path:
-            continue
-        abs_path = os.path.abspath(path)
-        if not abs_path.startswith(output_root + os.sep):
-            print(f"⚠️ 跳过清理中间目录（不在输出根目录内）: {abs_path}")
-            continue
-        if os.path.exists(abs_path):
-            print(f"🧹 清理中间目录: {abs_path}")
-            shutil.rmtree(abs_path, ignore_errors=True)
-
 def get_abs_path(relative_path: str) -> str:
     """获取脚本所在目录的绝对路径"""
     current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -740,10 +838,10 @@ def process_yolo2coco(input_dir: str, output_dir: str, seed: int = None):
         command.extend(["--task", str(task)])
     if yolo2coco_cfg.get("test_split_ratio") is not None:
         command.extend(["--test_split_ratio", str(yolo2coco_cfg["test_split_ratio"])])
-    if yolo2coco_cfg.get("split_seed") is not None:
-        command.extend(["--split_seed", str(yolo2coco_cfg["split_seed"])])
-    elif seed is not None:
+    if seed is not None:
         command.extend(["--split_seed", str(seed)])
+    elif yolo2coco_cfg.get("split_seed") is not None:
+        command.extend(["--split_seed", str(yolo2coco_cfg["split_seed"])])
 
     run_command(command, "YOLO转COCO", param_key="yolo2coco")
 
@@ -863,17 +961,26 @@ def main():
     args = parse_arguments()
 
     try:
-        active_profile = load_pipeline_profile(args.config_path, args.profile)
+        params_data = load_params_config(args.params_path)
+        preprocess_cfg = extract_preprocess_overrides(params_data)
+        global PENDING_DATASET_PAIRS
+        PENDING_DATASET_PAIRS = preprocess_cfg.get("dataset_pairs") if preprocess_cfg else []
+        profile_override = preprocess_cfg.get("profile") if preprocess_cfg else None
+        selected_profile = args.profile or profile_override
+        active_profile = load_pipeline_profile(args.config_path, selected_profile)
+        apply_preprocess_overrides(preprocess_cfg)
     except Exception as exc:
         print(f"❌ 配置加载失败：{exc}")
         sys.exit(1)
-    
-    global PIPELINE_SEED, KEEP_INTERMEDIATE
-    PIPELINE_SEED = args.seed
-    KEEP_INTERMEDIATE = args.keep_intermediate
+
+    global PIPELINE_SEED
+    seed_from_params = preprocess_cfg.get("seed") if preprocess_cfg else None
+    PIPELINE_SEED = args.seed if args.seed is not None else seed_from_params
 
     print("🚀 数据处理流水线启动（可控版本）！")
     print(f"配置文件：{CONFIG_PATH}")
+    if params_data.get("__params_path__"):
+        print(f"参数文件：{params_data['__params_path__']}")
     print(f"使用的profile：{active_profile}")
     print(f"基础路径：{BASE_PATH}")
     if DATASET_PAIRS:
@@ -888,7 +995,10 @@ def main():
     steps = validate_steps(args.steps)
     PARAM_LOG["selected_steps"] = list(steps)
     PARAM_LOG["seed"] = PIPELINE_SEED
-    PARAM_LOG["keep_intermediate"] = KEEP_INTERMEDIATE
+    if params_data.get("__params_path__"):
+        PARAM_LOG["params_path"] = params_data["__params_path__"]
+    if preprocess_cfg:
+        PARAM_LOG["params_overrides"] = preprocess_cfg.get("__overrides__", {})
     save_param_log()
     
     print(f"\n📌 将要执行的步骤：{' '.join(steps)}")
@@ -914,8 +1024,6 @@ def main():
                 sys.exit(1)
             else:
                 print("使用了 --force 参数，继续执行后续步骤")
-
-    # cleanup_intermediate_outputs()
 
     # 完成信息
     print("\n" + "🎉" * 50)
