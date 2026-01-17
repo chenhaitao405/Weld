@@ -1,0 +1,16 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Dataset configuration
+
+# Dataset paths
+path: /home/lenovo/code/CHT/datasets/Xray/self/1120/labeled/roi2_merge/yolo  # dataset root dir
+train: images/train  # train images (relative to 'path')
+val: images/val  # val images (relative to 'path')
+
+# Classes
+nc: 8  # number of classes
+names: ['其他', '内凹', '咬边', '圆形缺陷', '未焊透', '未熔合', '条形缺陷', '裂纹']  # class names
+
+# Label ID mapping
+label_id_map: {'其他': 0, '内凹': 1, '咬边': 2, '圆形缺陷': 3, '未焊透': 4, '未熔合': 5, '条形缺陷': 6, '裂纹': 7}
+
+# Note: All files have been prefixed with directory name: img20250609

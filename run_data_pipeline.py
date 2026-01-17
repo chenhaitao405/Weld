@@ -16,7 +16,7 @@ import copy
 import yaml
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_CONFIG_PATH = os.path.join(CURRENT_DIR, "configs", "pipeline_profiles.yaml")
+DEFAULT_CONFIG_PATH = os.path.join(CURRENT_DIR, "configs", "pipeline_profiles_new.yaml")
 
 CONFIG_PATH = DEFAULT_CONFIG_PATH
 ACTIVE_PROFILE_NAME = None
@@ -25,10 +25,15 @@ JSON_BASE_PATH = ""
 OUTPUT_BASE_DIR = ""
 REFERENCE_LABEL_MAP_PATH = "/datasets/PAR/Xray/self/1120/labeled/roi2_merge/yolo/dataset.yaml"
 DATASETS: List[str] = []
+DATASET_PAIRS: List[Dict[str, str]] = []
+DATASET_ITEMS: List[Dict[str, str]] = []
 OUTPUT_CONFIG: Dict[str, str] = {}
+INTERMEDIATE_OUTPUTS: Dict[str, str] = {}
 FIXED_PARAMS: Dict[str, Dict] = {}
 PARAM_LOG_PATH = ""
 PARAM_LOG: Dict = {}
+PIPELINE_SEED = None
+KEEP_INTERMEDIATE = False
 
 def _ensure_log_dir():
     if not PARAM_LOG_PATH:
@@ -66,7 +71,7 @@ def log_command(step_name: str, command: List[str], param_key: str = None,
     PARAM_LOG["commands"].append(entry)
     save_param_log()
 
-# 定义步骤信息
+# 定义步骤信息（合并步骤：23 与 456）
 STEP_INFO = {
     '1': {
         'name': 'Labelme转YOLO',
@@ -74,34 +79,16 @@ STEP_INFO = {
         'input': None,
         'output': 'yolo_dir'
     },
-    '2': {
-        'name': 'YOLO ROI提取',
-        'func': 'step2_roi_extractor',
+    '23': {
+        'name': 'YOLO ROI提取 + 竖图旋转',
+        'func': 'step23_roi_rotate',
         'input': 'yolo_dir',
-        'output': 'roi_dir'
-    },
-    '3': {
-        'name': 'YOLO竖图旋转',
-        'func': 'step3_rotate_yolo',
-        'input': 'roi_dir',
         'output': 'roi_rotate'
     },
-    '4': {
-        'name': '图像裁剪与增强',
-        'func': 'step4_patch_enhance',
+    '456': {
+        'name': '裁剪增强 + seg2det + YOLO转COCO',
+        'func': 'step456_patch_seg2det_coco',
         'input': 'roi_rotate',
-        'output': 'patch_dir'
-    },
-    '5': {
-        'name': '训练任务转换',
-        'func': 'step5_seg2det',
-        'input': 'patch_dir',
-        'output': 'cls_dir'
-    },
-    '6': {
-        'name': 'YOLO转COCO',
-        'func': 'step6_yolo2coco',
-        'input': 'cls_dir',
         'output': 'coco_dir'
     },
     '7': {
@@ -125,6 +112,101 @@ def resolve_path(path_value: str, base_dir: str = None) -> str:
         return os.path.abspath(os.path.join(base_dir, expanded))
 
     return os.path.abspath(expanded)
+
+
+def _normalize_dataset_pairs(raw_pairs: List[Dict[str, str]], base_dir: str) -> List[Dict[str, str]]:
+    """规范化 dataset_pairs 配置并解析路径."""
+    normalized: List[Dict[str, str]] = []
+    for idx, pair in enumerate(raw_pairs):
+        if not isinstance(pair, dict):
+            raise ValueError(f"dataset_pairs[{idx}] 必须是字典")
+
+        image_root_raw = pair.get("image_root") or pair.get("images") or pair.get("image_dir")
+        label_root_raw = pair.get("label_root") or pair.get("labels") or pair.get("label_dir")
+        if not image_root_raw or not label_root_raw:
+            raise ValueError(f"dataset_pairs[{idx}] 需要包含 image_root 与 label_root")
+
+        normalized.append({
+            "name": pair.get("name"),
+            "image_root": resolve_path(image_root_raw, base_dir),
+            "label_root": resolve_path(label_root_raw, base_dir),
+        })
+    return normalized
+
+
+def _has_json_files(target_dir: str) -> bool:
+    if not target_dir or not os.path.isdir(target_dir):
+        return False
+    for name in os.listdir(target_dir):
+        if name.endswith(".json"):
+            return True
+    return False
+
+
+def _resolve_label_dir(base_dir: str) -> str:
+    """优先使用 base_dir/label，否则回退到 base_dir。"""
+    if not base_dir or not os.path.isdir(base_dir):
+        return ""
+    label_dir = os.path.join(base_dir, "label")
+    if _has_json_files(label_dir):
+        return label_dir
+    if _has_json_files(base_dir):
+        return base_dir
+    if os.path.isdir(label_dir):
+        return label_dir
+    return base_dir
+
+
+def _discover_dataset_items_from_pairs(pairs: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """从 dataset_pairs 中发现子数据集，并生成 json_dir/image_dir 对。"""
+    items: List[Dict[str, str]] = []
+    for pair in pairs:
+        image_root = pair["image_root"]
+        label_root = pair["label_root"]
+        pair_tag = pair.get("name") or os.path.basename(label_root.rstrip(os.sep)) or os.path.basename(image_root.rstrip(os.sep))
+
+        if not os.path.exists(label_root):
+            print(f"⚠️ 跳过 {label_root}：标注目录不存在")
+            continue
+        if not os.path.exists(image_root):
+            print(f"⚠️ 跳过 {image_root}：图像目录不存在")
+            continue
+
+        subdirs = sorted([name for name in os.listdir(label_root)
+                          if os.path.isdir(os.path.join(label_root, name))])
+        if not subdirs:
+            print(f"⚠️ 未在 {label_root} 下找到子目录")
+            continue
+
+        for sub in subdirs:
+            json_base = os.path.join(label_root, sub)
+            json_dir = _resolve_label_dir(json_base)
+            image_dir = os.path.join(image_root, sub)
+            if not os.path.isdir(image_dir):
+                print(f"⚠️ 跳过 {pair_tag}/{sub}：图像目录不存在 {image_dir}")
+                continue
+            if not _has_json_files(json_dir):
+                print(f"⚠️ 跳过 {pair_tag}/{sub}：未找到JSON标注文件 {json_dir}")
+                continue
+            name = f"{pair_tag}/{sub}" if pair_tag else sub
+            items.append({
+                "name": name,
+                "json_dir": json_dir,
+                "image_dir": image_dir
+            })
+    return items
+
+
+def _build_dataset_items_from_legacy(datasets: List[str], base_path: str, json_base_path: str) -> List[Dict[str, str]]:
+    """兼容旧的 datasets + json_base_path 配置."""
+    items: List[Dict[str, str]] = []
+    for dataset in datasets:
+        items.append({
+            "name": dataset,
+            "json_dir": os.path.join(json_base_path, dataset, "label"),
+            "image_dir": os.path.join(base_path, dataset),
+        })
+    return items
 
 
 def load_pipeline_profile(config_path: str, requested_profile: str = None) -> str:
@@ -164,7 +246,8 @@ def load_pipeline_profile(config_path: str, requested_profile: str = None) -> st
 def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
     """根据 profile 设置全局路径和参数."""
     global CONFIG_PATH, ACTIVE_PROFILE_NAME, BASE_PATH, JSON_BASE_PATH
-    global OUTPUT_BASE_DIR, DATASETS, OUTPUT_CONFIG, FIXED_PARAMS
+    global OUTPUT_BASE_DIR, DATASETS, DATASET_PAIRS, DATASET_ITEMS
+    global OUTPUT_CONFIG, INTERMEDIATE_OUTPUTS, FIXED_PARAMS
     global PARAM_LOG_PATH, PARAM_LOG
     global REFERENCE_LABEL_MAP_PATH
 
@@ -173,26 +256,36 @@ def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
     if not base_path_raw:
         raise ValueError(f"profile {profile_name} 缺少 paths.base_path")
     json_base_raw = paths_section.get("json_base_path")
-    if not json_base_raw:
-        raise ValueError(f"profile {profile_name} 缺少 paths.json_base_path")
 
     output_base_raw = paths_section.get("output_base_dir") or "pipeline_outputs"
     labelme_params = (profile_data.get("params") or {}).get("labelme2yolo", {})
     reference_label_map_raw = paths_section.get("reference_label_map_path")
     if not reference_label_map_raw and not labelme_params.get("unify_to_crack"):
-        raise ValueError(f"profile {profile_name} 缺少 paths.reference_label_map_path")
+        print(f"⚠️ 警告：profile {profile_name} 未配置 reference_label_map_path，将自动扫描标签")
 
     CONFIG_PATH = config_path
     ACTIVE_PROFILE_NAME = profile_name
     BASE_PATH = resolve_path(base_path_raw)
-    JSON_BASE_PATH = resolve_path(json_base_raw)
+    JSON_BASE_PATH = resolve_path(json_base_raw, BASE_PATH) if json_base_raw else ""
     OUTPUT_BASE_DIR = resolve_path(output_base_raw, BASE_PATH)
     REFERENCE_LABEL_MAP_PATH = resolve_path(reference_label_map_raw, BASE_PATH) if reference_label_map_raw else ""
 
-    datasets = profile_data.get("datasets") or []
-    if not isinstance(datasets, list):
-        raise ValueError(f"profile {profile_name} 的 datasets 必须是列表")
-    DATASETS = list(datasets)
+    dataset_pairs_raw = profile_data.get("dataset_pairs")
+    if dataset_pairs_raw:
+        if not isinstance(dataset_pairs_raw, list):
+            raise ValueError(f"profile {profile_name} 的 dataset_pairs 必须是列表")
+        DATASET_PAIRS = _normalize_dataset_pairs(dataset_pairs_raw, BASE_PATH)
+        DATASET_ITEMS = _discover_dataset_items_from_pairs(DATASET_PAIRS)
+        DATASETS = [item["name"] for item in DATASET_ITEMS]
+    else:
+        if not json_base_raw:
+            raise ValueError(f"profile {profile_name} 缺少 paths.json_base_path")
+        datasets = profile_data.get("datasets") or []
+        if not isinstance(datasets, list):
+            raise ValueError(f"profile {profile_name} 的 datasets 必须是列表")
+        DATASETS = list(datasets)
+        DATASET_PAIRS = []
+        DATASET_ITEMS = _build_dataset_items_from_legacy(DATASETS, BASE_PATH, JSON_BASE_PATH)
 
     outputs_section = profile_data.get("outputs") or {}
     if not isinstance(outputs_section, dict) or not outputs_section:
@@ -203,6 +296,17 @@ def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
             raise ValueError(f"profile {profile_name} 中 outputs.{key} 为空")
         resolved_outputs[key] = resolve_path(value, OUTPUT_BASE_DIR)
     OUTPUT_CONFIG = resolved_outputs
+
+    # 初始化中间输出目录（可选覆盖）
+    tmp_root = os.path.join(OUTPUT_BASE_DIR, "_tmp")
+    INTERMEDIATE_OUTPUTS = {
+        "roi_dir": resolve_path(outputs_section.get("roi_dir") or "ROI", OUTPUT_BASE_DIR)
+        if "roi_dir" in outputs_section else os.path.join(tmp_root, "ROI"),
+        "patch_dir": resolve_path(outputs_section.get("patch_dir") or "patch", OUTPUT_BASE_DIR)
+        if "patch_dir" in outputs_section else os.path.join(tmp_root, "patch"),
+        "cls_dir": resolve_path(outputs_section.get("cls_dir") or "patch_det", OUTPUT_BASE_DIR)
+        if "cls_dir" in outputs_section else os.path.join(tmp_root, "patch_det"),
+    }
 
     FIXED_PARAMS = copy.deepcopy(profile_data.get("params") or {})
 
@@ -221,6 +325,8 @@ def apply_profile(config_path: str, profile_name: str, profile_data: Dict):
         "json_base_path": JSON_BASE_PATH,
         "reference_label_map_path": REFERENCE_LABEL_MAP_PATH,
         "datasets": list(DATASETS),
+        "dataset_pairs": list(DATASET_PAIRS),
+        "dataset_items": list(DATASET_ITEMS),
         "output_base_dir": OUTPUT_BASE_DIR,
         "selected_steps": [],
         "commands": []
@@ -259,20 +365,16 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法：
-  python %(prog)s --steps 1234567  # 运行所有7个步骤
-  python %(prog)s --steps 1234     # 只运行前4个步骤
-  python %(prog)s --steps 2345     # 只运行步骤2、3、4、5
-  python %(prog)s --steps 135      # 只运行步骤1、3、5
-  python %(prog)s --steps 6        # 只运行YOLO→COCO
-  
-步骤说明：
-  1: Labelme转YOLO格式
-  2: YOLO ROI区域提取
-  3: YOLO竖图旋转
-  4: 图像裁剪与增强
-  5: 训练任务转换（seg转det/cls）
-  6: YOLO→COCO 转换
-  7: COCO 数据集合并
+  python %(prog)s --steps 1234567  # 运行全部（会合并为 1/23/456/7）
+  python %(prog)s --steps 12       # 只运行步骤1和步骤23
+  python %(prog)s --steps 456      # 只运行步骤456
+  python %(prog)s --steps 7        # 只运行合并后的COCO
+
+步骤说明（合并版）：
+  1   : Labelme转YOLO格式
+  23  : YOLO ROI提取 + 竖图旋转
+  456 : 图像裁剪增强 + seg2det + YOLO→COCO
+  7   : COCO数据集合并
         """
     )
     
@@ -287,6 +389,19 @@ def parse_arguments():
         '--force',
         action='store_true',
         help='强制执行步骤，即使前置依赖的输出目录不存在'
+    )
+
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=None,
+        help='随机种子（用于数据划分、平衡等可复现控制）'
+    )
+
+    parser.add_argument(
+        '--keep-intermediate',
+        action='store_true',
+        help='保留中间产物目录（默认清理 ROI/patch/cls 等中间输出）'
     )
 
     parser.add_argument(
@@ -306,24 +421,34 @@ def parse_arguments():
     return parser.parse_args()
 
 def validate_steps(steps_str: str) -> List[str]:
-    """验证并返回要执行的步骤列表"""
+    """验证并返回要执行的步骤列表（合并 23 / 456）"""
     valid_steps = set('1234567')
-    steps = []
-    
+    requested = []
+
     for char in steps_str:
         if char in valid_steps:
-            if char not in steps:  # 避免重复
-                steps.append(char)
+            if char not in requested:  # 避免重复
+                requested.append(char)
         else:
             print(f"⚠️ 警告：忽略无效的步骤编号 '{char}'")
-    
-    if not steps:
+
+    if not requested:
         print("❌ 错误：没有有效的步骤可执行！")
         sys.exit(1)
-    
-    return steps
 
-def collect_all_labels(datasets: List[str], json_base_path: str,
+    merged_steps: List[str] = []
+    if '1' in requested:
+        merged_steps.append('1')
+    if '2' in requested or '3' in requested:
+        merged_steps.append('23')
+    if '4' in requested or '5' in requested or '6' in requested:
+        merged_steps.append('456')
+    if '7' in requested:
+        merged_steps.append('7')
+
+    return merged_steps
+
+def collect_all_labels(dataset_items: List[Dict[str, str]],
                        unify_to_crack: bool = False,
                        reference_label_map_path: str = None) -> OrderedDict:
     """
@@ -346,15 +471,16 @@ def collect_all_labels(datasets: List[str], json_base_path: str,
 
     print("\n📊 收集所有数据集的标签...")
     all_labels = set()
-    dataset_labels = {}
+    dataset_labels: Dict[str, set] = {}
 
-    for dataset in datasets:
-        json_dir = os.path.join(json_base_path, dataset, "label")
-        if not os.path.exists(json_dir):
-            print(f"  ⚠️ 跳过 {dataset}：标注目录不存在 {json_dir}")
+    for item in dataset_items:
+        dataset_name = item.get("name") or "unknown"
+        json_dir = item.get("json_dir")
+        if not json_dir or not os.path.exists(json_dir):
+            print(f"  ⚠️ 跳过 {dataset_name}：标注目录不存在 {json_dir}")
             continue
 
-        dataset_labels[dataset] = set()
+        dataset_labels[dataset_name] = set()
 
         # 扫描该数据集的所有JSON文件
         for json_file in os.listdir(json_dir):
@@ -369,14 +495,14 @@ def collect_all_labels(datasets: List[str], json_base_path: str,
                 for shape in data.get('shapes', []):
                     label = shape.get('label', '').strip()
                     if label:
-                        dataset_labels[dataset].add(label)
+                        dataset_labels[dataset_name].add(label)
                         all_labels.add(label)
 
             except Exception as e:
                 print(f"  ⚠️ 读取文件失败 {json_file}: {e}")
 
-        if dataset_labels[dataset]:
-            print(f"  ✓ {dataset}: 发现 {len(dataset_labels[dataset])} 个标签")
+        if dataset_labels[dataset_name]:
+            print(f"  ✓ {dataset_name}: 发现 {len(dataset_labels[dataset_name])} 个标签")
 
     # 创建统一的标签映射
     sorted_labels = sorted(all_labels)
@@ -415,9 +541,7 @@ label_id_map: {dict(label_map)}
 
     print(f"\n✅ 创建统一的 dataset.yaml: {yaml_path}")
 
-def process_labelme2yolo_unified(datasets: List[str], base_path: str,
-                                  json_base_path: str, output_dir: str,
-                                  ):
+def process_labelme2yolo_unified(dataset_items: List[Dict[str, str]], output_dir: str, seed: int = None):
     """
     直接处理所有数据集到主目录，使用统一的标签映射
     """
@@ -429,8 +553,7 @@ def process_labelme2yolo_unified(datasets: List[str], base_path: str,
 
     # 第一步：收集所有标签，建立统一映射
     label_map = collect_all_labels(
-        datasets,
-        json_base_path,
+        dataset_items,
         unify_to_crack,
         REFERENCE_LABEL_MAP_PATH
     )
@@ -442,15 +565,16 @@ def process_labelme2yolo_unified(datasets: List[str], base_path: str,
     # 第二步：直接处理所有数据集到主目录
     script_path = get_abs_path(FIXED_PARAMS["labelme2yolo"]["script_path"])
 
-    for dataset in datasets:
-        image_dir = os.path.join(base_path, dataset)
-        json_dir = os.path.join(json_base_path, dataset, "label")
+    for item in dataset_items:
+        dataset_name = item.get("name") or "unknown"
+        image_dir = item.get("image_dir")
+        json_dir = item.get("json_dir")
 
-        if not os.path.exists(image_dir) or not os.path.exists(json_dir):
-            print(f"⚠️ 跳过 {dataset}：路径不存在")
+        if not image_dir or not json_dir or not os.path.exists(image_dir) or not os.path.exists(json_dir):
+            print(f"⚠️ 跳过 {dataset_name}：路径不存在")
             continue
 
-        print(f"\n处理数据集: {dataset}")
+        print(f"\n处理数据集: {dataset_name}")
 
         command = [
             sys.executable, script_path,
@@ -463,12 +587,15 @@ def process_labelme2yolo_unified(datasets: List[str], base_path: str,
         if FIXED_PARAMS["labelme2yolo"]["seg"]:
             command.append("--seg")
 
+        if seed is not None:
+            command.extend(["--seed", str(seed)])
+
         # 执行转换
         run_command(
             command,
-            f"Labelme转YOLO - {dataset}",
+            f"Labelme转YOLO - {dataset_name}",
             param_key="labelme2yolo",
-            extra_info={"dataset": dataset}
+            extra_info={"dataset": dataset_name, "json_dir": json_dir, "image_dir": image_dir}
         )
 
 def run_command(command: List[str], step_name: str, param_key: str = None,
@@ -493,6 +620,24 @@ def run_command(command: List[str], step_name: str, param_key: str = None,
     except subprocess.CalledProcessError as e:
         print(f"\n❌ 【{step_name}】执行失败！错误码：{e.returncode}")
         sys.exit(1)
+
+
+def cleanup_intermediate_outputs():
+    """清理中间产物目录（仅限 OUTPUT_BASE_DIR 下的 _tmp 或显式中间目录）"""
+    if KEEP_INTERMEDIATE:
+        return
+
+    output_root = os.path.abspath(OUTPUT_BASE_DIR)
+    for key, path in INTERMEDIATE_OUTPUTS.items():
+        if not path:
+            continue
+        abs_path = os.path.abspath(path)
+        if not abs_path.startswith(output_root + os.sep):
+            print(f"⚠️ 跳过清理中间目录（不在输出根目录内）: {abs_path}")
+            continue
+        if os.path.exists(abs_path):
+            print(f"🧹 清理中间目录: {abs_path}")
+            shutil.rmtree(abs_path, ignore_errors=True)
 
 def get_abs_path(relative_path: str) -> str:
     """获取脚本所在目录的绝对路径"""
@@ -526,7 +671,7 @@ def process_rotate_yolo(input_dir: str, output_dir: str):
 
     run_command(command, "YOLO竖图旋转", param_key="rotate_yolo")
 
-def process_patch_enhance(input_dir: str, output_dir: str):
+def process_patch_enhance(input_dir: str, output_dir: str, seed: int = None):
     """执行图像裁剪增强"""
     script_path = get_abs_path(FIXED_PARAMS["patchandenhance"]["script_path"])
     patch_cfg = FIXED_PARAMS["patchandenhance"]
@@ -551,10 +696,12 @@ def process_patch_enhance(input_dir: str, output_dir: str):
         ])
 
     command.extend(["--slice_mode", str(slice_mode)])
+    if seed is not None:
+        command.extend(["--seed", str(seed)])
 
     run_command(command, "图像裁剪与增强", param_key="patchandenhance")
 
-def seg2det(input_dir: str, output_dir: str):
+def seg2det(input_dir: str, output_dir: str, seed: int = None):
     """执行训练任务转换"""
     seg_cfg = FIXED_PARAMS["seg2det"]
     script_path = get_abs_path(seg_cfg["script_path"])
@@ -569,11 +716,13 @@ def seg2det(input_dir: str, output_dir: str):
         balance_ratio = seg_cfg.get("balance_ratio")
         if balance_ratio is not None:
             command.extend(["--balance_ratio", str(balance_ratio)])
+    if seed is not None:
+        command.extend(["--seed", str(seed)])
 
     run_command(command, "训练任务转换", param_key="seg2det")
 
 
-def process_yolo2coco(input_dir: str, output_dir: str):
+def process_yolo2coco(input_dir: str, output_dir: str, seed: int = None):
     """执行 YOLO→COCO 转换"""
     yolo2coco_cfg = FIXED_PARAMS.get("yolo2coco")
     if not yolo2coco_cfg:
@@ -593,6 +742,8 @@ def process_yolo2coco(input_dir: str, output_dir: str):
         command.extend(["--test_split_ratio", str(yolo2coco_cfg["test_split_ratio"])])
     if yolo2coco_cfg.get("split_seed") is not None:
         command.extend(["--split_seed", str(yolo2coco_cfg["split_seed"])])
+    elif seed is not None:
+        command.extend(["--split_seed", str(seed)])
 
     run_command(command, "YOLO转COCO", param_key="yolo2coco")
 
@@ -657,72 +808,42 @@ def step1_labelme2yolo():
     print("=" * 100)
     
     process_labelme2yolo_unified(
-        DATASETS,
-        BASE_PATH,
-        JSON_BASE_PATH,
+        DATASET_ITEMS,
         OUTPUT_CONFIG["yolo_dir"],
+        seed=PIPELINE_SEED,
     )
 
-def step2_roi_extractor():
-    """步骤2: YOLO ROI提取"""
+def step23_roi_rotate():
+    """步骤23: YOLO ROI提取 + 竖图旋转"""
     print("\n" + "=" * 100)
-    print("📝 步骤2: 执行 YOLO ROI 区域提取")
+    print("📝 步骤23: 执行 YOLO ROI 提取 + 竖图旋转")
     print("=" * 100)
-    
+
     if not os.path.exists(OUTPUT_CONFIG["yolo_dir"]):
         print(f"⚠️ 警告：YOLO 数据集目录不存在 {OUTPUT_CONFIG['yolo_dir']}")
         print("  提示：可能需要先执行步骤1")
-    
-    process_roi_extractor(OUTPUT_CONFIG["yolo_dir"], OUTPUT_CONFIG["roi_dir"])
 
-def step3_rotate_yolo():
-    """步骤3: YOLO竖图旋转"""
-    print("\n" + "=" * 100)
-    print("📝 步骤3: 执行竖图旋转归一")
-    print("=" * 100)
-    
-    if not os.path.exists(OUTPUT_CONFIG["roi_dir"]):
-        print(f"⚠️ 警告：ROI 提取目录不存在 {OUTPUT_CONFIG['roi_dir']}")
-        print("  提示：可能需要先执行步骤2")
-    
-    process_rotate_yolo(OUTPUT_CONFIG["roi_dir"], OUTPUT_CONFIG["roi_rotate"])
+    roi_dir = INTERMEDIATE_OUTPUTS["roi_dir"]
+    process_roi_extractor(OUTPUT_CONFIG["yolo_dir"], roi_dir)
+    process_rotate_yolo(roi_dir, OUTPUT_CONFIG["roi_rotate"])
 
-def step4_patch_enhance():
-    """步骤4: 图像裁剪与增强"""
+
+def step456_patch_seg2det_coco():
+    """步骤456: 图像裁剪增强 + seg2det + YOLO→COCO"""
     print("\n" + "=" * 100)
-    print("📝 步骤4: 执行图像裁剪与增强")
+    print("📝 步骤456: 图像裁剪增强 + seg2det + YOLO→COCO")
     print("=" * 100)
-    
+
     if not os.path.exists(OUTPUT_CONFIG["roi_rotate"]):
         print(f"⚠️ 警告：ROI 旋转目录不存在 {OUTPUT_CONFIG['roi_rotate']}")
-        print("  提示：可能需要先执行步骤3")
-    
-    process_patch_enhance(OUTPUT_CONFIG["roi_rotate"], OUTPUT_CONFIG["patch_dir"])
+        print("  提示：可能需要先执行步骤23")
 
-def step5_seg2det():
-    """步骤5: 训练任务转换"""
-    print("\n" + "=" * 100)
-    print("📝 步骤5: 执行训练任务转换")
-    print("=" * 100)
-    
-    if not os.path.exists(OUTPUT_CONFIG["patch_dir"]):
-        print(f"⚠️ 警告：patch 目录不存在 {OUTPUT_CONFIG['patch_dir']}")
-        print("  提示：可能需要先执行步骤4")
-    
-    seg2det(OUTPUT_CONFIG["patch_dir"], OUTPUT_CONFIG["cls_dir"])
+    patch_dir = INTERMEDIATE_OUTPUTS["patch_dir"]
+    cls_dir = INTERMEDIATE_OUTPUTS["cls_dir"]
 
-
-def step6_yolo2coco():
-    """步骤6: YOLO→COCO 转换"""
-    print("\n" + "=" * 100)
-    print("📝 步骤6: YOLO→COCO 转换")
-    print("=" * 100)
-
-    if not os.path.exists(OUTPUT_CONFIG["cls_dir"]):
-        print(f"⚠️ 警告：det 数据目录不存在 {OUTPUT_CONFIG['cls_dir']}")
-        print("  提示：可能需要先执行步骤5")
-
-    process_yolo2coco(OUTPUT_CONFIG["cls_dir"], OUTPUT_CONFIG["coco_dir"])
+    process_patch_enhance(OUTPUT_CONFIG["roi_rotate"], patch_dir, seed=PIPELINE_SEED)
+    seg2det(patch_dir, cls_dir, seed=PIPELINE_SEED)
+    process_yolo2coco(cls_dir, OUTPUT_CONFIG["coco_dir"], seed=PIPELINE_SEED)
 
 
 def step7_merge_coco():
@@ -747,15 +868,27 @@ def main():
         print(f"❌ 配置加载失败：{exc}")
         sys.exit(1)
     
+    global PIPELINE_SEED, KEEP_INTERMEDIATE
+    PIPELINE_SEED = args.seed
+    KEEP_INTERMEDIATE = args.keep_intermediate
+
     print("🚀 数据处理流水线启动（可控版本）！")
     print(f"配置文件：{CONFIG_PATH}")
     print(f"使用的profile：{active_profile}")
     print(f"基础路径：{BASE_PATH}")
-    print(f"待处理数据集：{DATASETS}")
+    if DATASET_PAIRS:
+        print(f"数据集对数量：{len(DATASET_PAIRS)}")
+        for pair in DATASET_PAIRS:
+            print(f"  - images: {pair['image_root']} | labels: {pair['label_root']}")
+        print(f"待处理子数据集数量：{len(DATASET_ITEMS)}")
+    else:
+        print(f"待处理数据集：{DATASETS}")
     
     # 验证步骤
     steps = validate_steps(args.steps)
     PARAM_LOG["selected_steps"] = list(steps)
+    PARAM_LOG["seed"] = PIPELINE_SEED
+    PARAM_LOG["keep_intermediate"] = KEEP_INTERMEDIATE
     save_param_log()
     
     print(f"\n📌 将要执行的步骤：{' '.join(steps)}")
@@ -781,7 +914,9 @@ def main():
                 sys.exit(1)
             else:
                 print("使用了 --force 参数，继续执行后续步骤")
-    
+
+    # cleanup_intermediate_outputs()
+
     # 完成信息
     print("\n" + "🎉" * 50)
     print("🎉 所选步骤执行完成！")

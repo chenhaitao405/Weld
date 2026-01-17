@@ -1,0 +1,58 @@
+default_profile: pair_1120_1208
+
+profiles:
+  pair_1120_1208:
+    platform: Linux
+    description: 以 datasets/images 与 datasets/labels 配对的预处理配置示例
+    paths:
+      base_path: /datasets/PAR/Weld
+      output_base_dir: outputs/pipeline_pair_1120_1208
+    dataset_pairs:
+      - image_root: datasets/images/1120
+        label_root: datasets/labels/1120
+      - image_root: datasets/images/1208
+        label_root: datasets/labels/1208
+    outputs:
+      yolo_dir: yolo
+      roi_dir: ROI
+      roi_rotate: ROI_rotate
+      patch_dir: patch_640
+      cls_dir: patch_det
+      coco_dir: coco_from_patch
+      merged_coco_dir: coco_merged
+    params:
+      labelme2yolo:
+        seg: true
+        unify_to_crack: false
+        script_path: convert/labelme2yolo.py
+      yolo_roi_extractor:
+        model_path: ./model/weldROI4.pt
+        roi_conf: 0.25
+        roi_iou: 0.45
+        padding: 0.1
+        mode: seg
+        script_path: convert/pj/yolo_roi_extractor.py
+      rotate_yolo:
+        script_path: convert/pj/rotateYOLOdate.py
+      patchandenhance:
+        overlap: 0.7
+        enhance_mode: windowing
+        slice_mode: 3
+        window_size: [640, 640]
+        label_mode: seg
+        script_path: convert/pj/patchandenhance.py
+      seg2det:
+        mode: det
+        script_path: convert/pj/seg2det.py
+        balance_data: false
+        balance_ratio: 1.0
+      yolo2coco:
+        script_path: convert/yolo2coco.py
+        task: det
+        test_split_ratio: 0.05
+        split_seed: 42
+      merge_coco:
+        script_path: convert/merge_coco.py
+        dataset_b: roi2_merge/coco_det
+        splits: [train, valid, test]
+        merge_ratio: [1.0]

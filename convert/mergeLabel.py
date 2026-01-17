@@ -5,29 +5,29 @@ from pathlib import Path
 from typing import Dict, List
 
 # 基础路径配置
-BASE_PATH ="/datasets/PAR/Xray/self/1120/1215adjust/1120"
-OUTPUT_PATH = "/datasets/PAR/Xray/self/1120/1215adjust"
+BASE_PATH ="/datasets/PAR/Weld/datasets/labels/1208"
+OUTPUT_PATH = "/datasets/PAR/Weld/datasets/labels/1208"
 
 # 数据集列表
-DATASETS = [
-    "D1",
-    "D2",
-    "D3",
-    "D4",
-    "img20250608",
-    "img20250609"
-]
-
 # DATASETS = [
-#     "6-1_8bit",
-#     "6-2_8bit",
-#     "7-1_8bit",
-#     "7-2_8bit",
-#     "8_8bit",
-#     "9-1_8bit",
-#     "9-2_8bit",
-#     "DP_8bit"
+#     "D1",
+#     "D2",
+#     "D3",
+#     "D4",
+#     "img20250608",
+#     "img20250609"
 # ]
+
+DATASETS = [
+    "6-1_8bit",
+    "6-2_8bit",
+    "7-1_8bit",
+    "7-2_8bit",
+    "8_8bit",
+    "9-1_8bit",
+    "9-2_8bit",
+    "DP_8bit"
+]
 
 # 标注类型映射关系
 LABEL_MAPPING = {

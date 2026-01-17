@@ -20,18 +20,18 @@ CLASS_NAMES = [
     "裂纹"
 ]
 
-model = RFDETRBase()
+model = RFDETRLarge()
 
 DEFAULT_TRAINING_ARGS = {
-    "dataset_dir": "/datasets/PAR/Xray/self/1208/roi3_1215/coco_merged",
+    "dataset_dir": "../outputs/pipeline_pair_1120_1208/coco_from_patch",
     "epochs": 500,
     "batch_size": 2,
     "grad_accum_steps": 8,
     "lr": 1e-4,
-    "output_dir": "/datasets/PAR/detr_runs/1230/detrmedium",
+    "output_dir": "/datasets/PAR/detr_runs/0116/detrlarge",
     "early_stopping": True,
-    "run": "patch_resume",  # mlflow 的 run name
-    "resume" : "/datasets/PAR/detr_runs/1230/detrmedium/merge_patch/checkpoint_best_total.pth",
+    "run": "large_patch_resume",  # mlflow 的 run name
+    "resume" : "/datasets/PAR/detr_runs/1230/detrlarge/patch640_ratio_1/checkpoint_best_regular.pth",
     "resolution": 840,
     # "lr_scheduler": "cosine",
     # "warmup_epochs": 5,
