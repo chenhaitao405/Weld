@@ -1,13 +1,13 @@
 preprocess:
   profile: pair_1120_1208
   seed: 42
-  output_base_dir: data/pipeline_pair_1120_1208_test
+  output_base_dir: data/pipeline_pair_1120
   steps: 123456
   dataset_pairs:
   - image_root: datasets/images/1120
     label_root: datasets/labels/1120
-  - image_root: datasets/images/1208
-    label_root: datasets/labels/1208
+#  - image_root: datasets/images/1208
+#    label_root: datasets/labels/1208
   labelme2yolo:
     seg: true
     unify_to_crack: false
@@ -41,6 +41,29 @@ preprocess:
     - test
     merge_ratio:
     - 1.0
+rfdetr:
+  dataset_dir: data/pipeline_pair_1120_1208_test/coco_from_patch
+  output_dir: outputs/rfdetr
+  run: 1120_SWRD_resumePatch
+  resume: train/checkpoint_best_total.nodp.pth
+  resolution: 840
+  class_names:
+  - 其他
+  - 内凹
+  - 咬边
+  - 圆形缺陷
+  - 未焊透
+  - 未熔合
+  - 条形缺陷
+  - 裂纹
+  num_classes: 8
+  epochs: 500
+  batch_size: 2
+  grad_accum_steps: 8
+  lr: 0.0001
+  early_stopping: true
+  metrics_path: metrics/rfdetr.json
+  keep_best_only: true
 data:
   tag: crack_v1
   raw_dir: datasets/crack/crack

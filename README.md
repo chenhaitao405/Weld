@@ -130,7 +130,7 @@ python run_full_pipeline.py \
   --base-path \
   outputs/valid/1120data/1215slice3mixedp1_SWRDpatch \
   --run-inference-opts \
-  \"--image-dir /datasets/PAR/Xray/self/1120/labeled/roi2_merge/yolo_det_coco/valid --mode det --visualize --roi-weights ./model/weldROI3.pt --mode det --visualize --det-wide-slice --roi-weights ./model/weldROI3.pt --det-confidence 0.25  --primary-weights train/runs/1208/detrlarge/1215slice3mixedp1/checkpoint_best_regular.pth --class-names \\\"其他\\\" \\\"内凹\\\" \\\"咬边\\\" \\\"圆形缺陷\\\" \\\"未焊透\\\" \\\"未熔合\\\" \\\"条形缺陷\\\" \\\"裂纹\\\"  --det-secondary-variant large --secondary-weights train/runs/1208/detrlarge/mixedp1_patch640_res560_/checkpoint_best_regular.pth --det-patch-overlap 0.5 --det-fusion-iou 0.4 --patch-size 640 640 --det-secondary-confidence 0.3 \" \
+  \"--image-dir /datasets/PAR/Xray/self/1120/labeled/roi2_merge/yolo_det_coco/valid --mode det --wide-slice --roi-weights ./model/weldROI3.pt --primary-conf 0.25 --fusion-iou 0.4 --primary-weights train/runs/1208/detrlarge/1215slice3mixedp1/checkpoint_best_regular.pth\" \
   --validate-opts \
   \"--label-format coco --iou-threshold 0.01 --coco-json  /datasets/PAR/Xray/self/1120/labeled/roi2_merge/yolo_det_coco/valid/_annotations.coco.json --copy-images  --match-mode best\" \
   --visualize-opts \

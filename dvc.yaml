@@ -18,3 +18,19 @@ stages:
     outs:
       - ${preprocess.output_base_dir}:
           cache: false
+  train_rfdetr:
+    cmd: >-
+      python train/rfdetrtrain.py
+      --params-file params.yaml
+    deps:
+      - train/rfdetrtrain.py
+      - params.yaml
+      - ${preprocess.output_base_dir}/coco_from_patch
+    params:
+      - rfdetr
+      - preprocess.output_base_dir
+    outs:
+      - ${rfdetr.output_dir}:
+          cache: false
+    metrics:
+      - ${rfdetr.metrics_path}

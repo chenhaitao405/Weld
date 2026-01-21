@@ -47,8 +47,8 @@ stages:
       nfiles: 1071
     - path: params.yaml
       hash: md5
-      md5: 8b22bc8e2ce41a64e6f07693035d2c7a
-      size: 1147
+      md5: a449897098be0e04bcd38b54752eef6b
+      size: 1620
     - path: run_data_pipeline.py
       hash: md5
       md5: 2191255a81c494ba29d1d012ab88c2da
@@ -58,13 +58,11 @@ stages:
         preprocess:
           profile: pair_1120_1208
           seed: 42
-          output_base_dir: data/pipeline_pair_1120_1208_test
+          output_base_dir: data/pipeline_pair_1120
           steps: 123456
           dataset_pairs:
           - image_root: datasets/images/1120
             label_root: datasets/labels/1120
-          - image_root: datasets/images/1208
-            label_root: datasets/labels/1208
           labelme2yolo:
             seg: true
             unify_to_crack: false
@@ -99,8 +97,8 @@ stages:
             merge_ratio:
             - 1.0
     outs:
-    - path: data/pipeline_pair_1120_1208_test
+    - path: data/pipeline_pair_1120
       hash: md5
-      md5: bdfb164799611f53e718ffeab3996b01.dir
-      size: 8395730975
-      nfiles: 18172
+      md5: 4c2115743779e0f316d35fa0119395e0.dir
+      size: 6732460381
+      nfiles: 11358
