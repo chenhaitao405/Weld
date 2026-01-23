@@ -355,11 +355,6 @@ class YOLOSlidingWindowProcessor:
         if not patches:
             return stats
 
-        # 先切片，再对每个切片单独增强，确保拼接前的图像质量一致
-        for entry in patches:
-            slice_patch: WideSlicePatch = entry['patch']
-            slice_patch.image = enhance_image(slice_patch.image, self.enhance_mode)
-
         pending_full: Optional[Dict[str, Any]] = None
         pair_idx = 0
         single_idx = 0
@@ -370,8 +365,9 @@ class YOLOSlidingWindowProcessor:
 
         if not plan.is_wide:
             output_name = f"{base_name}_sq1120"
+            full_enhanced = enhance_image(image, self.enhance_mode)
             result = self._save_mode3_output(
-                patches[0]['patch'].image,
+                full_enhanced,
                 patches[0]['labels'],
                 output_image_dir,
                 output_label_dir,
@@ -379,6 +375,26 @@ class YOLOSlidingWindowProcessor:
             )
             update_stats(result)
             return stats
+
+        # 宽图场景：保留一份原图（方形）以覆盖主分支输入
+        output_name = f"{base_name}_sq1120"
+        full_enhanced = enhance_image(image, self.enhance_mode)
+        full_labels = self.adjust_yolo_labels_for_crop(
+            labels, 0, 0, w, h, w, h
+        )
+        result = self._save_mode3_output(
+            full_enhanced,
+            full_labels,
+            output_image_dir,
+            output_label_dir,
+            output_name
+        )
+        update_stats(result)
+
+        # 先切片，再对每个切片单独增强，确保拼接前的图像质量一致
+        for entry in patches:
+            slice_patch: WideSlicePatch = entry['patch']
+            slice_patch.image = enhance_image(slice_patch.image, self.enhance_mode)
 
         for entry in patches:
             patch: WideSlicePatch = entry['patch']
