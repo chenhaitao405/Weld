@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 import mlflow
 import yaml
 
-from rfdetr import RFDETRSeg2XLarge, RFDETRLarge, RFDETRSegPreview, RFDETRMedium,RFDETRSegXLarge
+from rfdetr import RFDETRSeg2XLarge, RFDETRLarge, RFDETRSegPreview, RFDETRMedium,RFDETRSegXLarge,RFDETR2XLarge
 
 CLASS_NAMES = [
     "其他",
@@ -21,24 +21,24 @@ CLASS_NAMES = [
     "裂纹"
 ]
 
-model = RFDETRSeg2XLarge()
+model = RFDETR2XLarge()
+#预训练数据 datasets/PAR/Xray/datasets_merge/patch640_ratio_1
+# SWRD DATSET /datasets/PAR/Xray/opensource/SWRD8bit/swr_pipeline/patch_det_coco
+#############/datasets/PAR/Xray/opensource/SWRD8bit/swr_pipeline/coco_patch_det_slice3
+# 1120DATASET /datasets/PAR/Weld/data/pipeline_pair_1120/coco_from_patch
+# 1120DATASET 1208+1120 /datasets/PAR/Weld/data/datasets_merge/1120_1208/coco_det
 
-DEFAULT_TRAINING_ARGS = {
-    "dataset_dir": "/datasets/PAR/Weld/data/pipeline_pair_1120/coco_patch_seg",
-    "epochs": 500,
-    "batch_size": 2,
-    "grad_accum_steps": 8,
-    "lr": 1e-4,
-    "output_dir": "outputs/RFDETRSeg2XLarge",
-    "early_stopping": True,
-    "run": "patchresume_1120data",  # mlflow 的 run name
-    "resume": "outputs/RFDETRSeg2XLarge/SWRD_PATCH/checkpoint_best_regular.pth",
-    "resolution": 0,
-    "class_names": CLASS_NAMES,
-    "num_classes": len(CLASS_NAMES),
-    "metrics_path": "metrics/rfdetr.json",
-    "keep_best_only": False,
-}
+DEFAULT_DATASET_DIR = "/datasets/PAR/Weld/data/pipeline_pair_1120/coco_from_patch"
+DEFAULT_EPOCHS = 500
+DEFAULT_BATCH_SIZE = 4
+DEFAULT_GRAD_ACCUM_STEPS = 64
+DEFAULT_LR = 1e-4
+DEFAULT_OUTPUT_DIR = "outputs/RFDETR2XLarge"
+DEFAULT_EARLY_STOPPING = True
+DEFAULT_RUN_NAME = "1120_1208_resume1120_patchresume"
+DEFAULT_RESUME = "/datasets/PAR/Weld/outputs/RFDETR2XLarge/1208_resume1120_patchresume/checkpoint_best_regular.pth"
+DEFAULT_METRICS_PATH = "metrics/rfdetr.json"
+DEFAULT_KEEP_BEST_ONLY = False
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -84,59 +84,61 @@ def _load_training_args() -> Dict[str, Any]:
     parser = argparse.ArgumentParser(description="RF-DETR training entrypoint")
     parser.add_argument("--params-file", type=str, help="Path to JSON/YAML file overriding training args")
     parser.add_argument("--dataset-dir", type=str, default=None,
-                        help=f"Dataset root directory (default: {DEFAULT_TRAINING_ARGS['dataset_dir']})")
-    parser.add_argument("--epochs", type=int, default=None,
-                        help=f"Number of epochs (default: {DEFAULT_TRAINING_ARGS['epochs']})")
+                        help=f"Dataset root directory (default: {DEFAULT_DATASET_DIR})")
     parser.add_argument("--batch-size", type=int, default=None,
-                        help=f"Batch size (default: {DEFAULT_TRAINING_ARGS['batch_size']})")
+                        help=f"Batch size (default: {DEFAULT_BATCH_SIZE})")
     parser.add_argument("--grad-accum-steps", type=int, default=None,
-                        help=f"Gradient accumulation steps (default: {DEFAULT_TRAINING_ARGS['grad_accum_steps']})")
-    parser.add_argument("--lr", type=float, default=None,
-                        help=f"Learning rate (default: {DEFAULT_TRAINING_ARGS['lr']})")
+                        help=f"Gradient accumulation steps (default: {DEFAULT_GRAD_ACCUM_STEPS})")
     parser.add_argument("--output-dir", type=str, default=None,
                         help=("Output root directory; actual run output will be output_dir/run "
-                              f"(default: {DEFAULT_TRAINING_ARGS['output_dir']})"))
+                              f"(default: {DEFAULT_OUTPUT_DIR})"))
     parser.add_argument("--run", type=str, default=None,
-                        help=f"Run name, also used as MLflow run name (default: {DEFAULT_TRAINING_ARGS['run']})")
+                        help=f"Run name, also used as MLflow run name (default: {DEFAULT_RUN_NAME})")
     parser.add_argument("--resume", type=str, default=None,
-                        help=f"Resume checkpoint path (default: {DEFAULT_TRAINING_ARGS['resume']})")
+                        help=f"Resume checkpoint path (default: {DEFAULT_RESUME})")
     parser.add_argument("--resolution", type=int, default=None,
-                        help=f"Input resolution (default: {DEFAULT_TRAINING_ARGS['resolution']})")
-    parser.add_argument("--class-names", nargs="+", default=None,
-                        help="Space separated list of class names")
-    parser.add_argument("--num-classes", type=int, default=None,
-                        help="Number of classes; defaults to len(class_names)")
+                        help="Input resolution")
     parser.add_argument("--metrics-path", type=str, default=None,
-                        help=f"Metrics output path (default: {DEFAULT_TRAINING_ARGS['metrics_path']})")
+                        help=f"Metrics output path (default: {DEFAULT_METRICS_PATH})")
     parser.add_argument("--keep-best-only", dest="keep_best_only", action="store_true",
                         help="Keep only checkpoint_best_total.pth in the run output dir")
     parser.add_argument("--keep-all-checkpoints", dest="keep_best_only", action="store_false",
                         help="Keep all checkpoints in the run output dir")
-    parser.add_argument("--early-stopping", dest="early_stopping", action="store_true",
-                        help="Enable early stopping")
-    parser.add_argument("--no-early-stopping", dest="early_stopping", action="store_false",
-                        help="Disable early stopping")
-    parser.set_defaults(early_stopping=None, keep_best_only=None)
+    parser.set_defaults(keep_best_only=None)
 
     args = parser.parse_args()
-    training_args: Dict[str, Any] = dict(DEFAULT_TRAINING_ARGS)
+    training_args: Dict[str, Any] = {
+        "dataset_dir": DEFAULT_DATASET_DIR,
+        "epochs": DEFAULT_EPOCHS,
+        "batch_size": DEFAULT_BATCH_SIZE,
+        "grad_accum_steps": DEFAULT_GRAD_ACCUM_STEPS,
+        "lr": DEFAULT_LR,
+        "output_dir": DEFAULT_OUTPUT_DIR,
+        "early_stopping": DEFAULT_EARLY_STOPPING,
+        "run": DEFAULT_RUN_NAME,
+        "resume": DEFAULT_RESUME,
+        "class_names": CLASS_NAMES,
+        "num_classes": len(CLASS_NAMES),
+        "metrics_path": DEFAULT_METRICS_PATH,
+        "keep_best_only": DEFAULT_KEEP_BEST_ONLY,
+    }
 
     if args.params_file:
         params_path = Path(args.params_file).expanduser()
         overrides = _load_params_file(params_path, parser)
-        training_args.update(overrides)
+        for key, value in overrides.items():
+            if key in {"epochs", "lr", "early_stopping", "class_names", "num_classes"}:
+                continue
+            training_args[key] = value
 
     override_keys = [
         "dataset_dir",
-        "epochs",
         "batch_size",
         "grad_accum_steps",
-        "lr",
         "output_dir",
         "run",
         "resume",
         "resolution",
-        "early_stopping",
         "metrics_path",
         "keep_best_only",
     ]
@@ -145,19 +147,6 @@ def _load_training_args() -> Dict[str, Any]:
         value = getattr(args, key)
         if value is not None:
             training_args[key] = value
-
-    if args.class_names is not None:
-        training_args["class_names"] = args.class_names
-    else:
-        existing = training_args.get("class_names", CLASS_NAMES)
-        training_args["class_names"] = list(existing)
-
-    if args.num_classes is not None:
-        training_args["num_classes"] = args.num_classes
-    else:
-        training_args["num_classes"] = training_args.get("num_classes", len(training_args["class_names"]))
-        if training_args["num_classes"] is None:
-            training_args["num_classes"] = len(training_args["class_names"])
 
     return training_args
 
@@ -325,9 +314,7 @@ def _build_mlflow_callbacks(log_path: Path, metrics_file: Path, keep_best_only: 
 
 
 log_file_path = run_output_dir / "log_terminal.txt"
-keep_best_only = training_args.get("keep_best_only")
-if keep_best_only is None:
-    keep_best_only = DEFAULT_TRAINING_ARGS["keep_best_only"]
+keep_best_only = training_args.get("keep_best_only", DEFAULT_KEEP_BEST_ONLY)
 epoch_callback, train_end_callback = _build_mlflow_callbacks(
     log_file_path,
     metrics_path,
@@ -348,12 +335,13 @@ with _log_terminal_output(log_file_path):
             lr=training_args["lr"],
             output_dir=str(run_output_dir),
             early_stopping=training_args["early_stopping"],
+            early_stopping_patience=30,
             run=training_args["run"],
-            # resolution= 1080,
+            # resolution= training_args["resolution"],
             # positional_encoding_size= 1080//12,
             class_names=training_args["class_names"],
             num_classes=training_args["num_classes"],
-            resume=training_args["resume"],
+            resume=DEFAULT_RESUME,
             # eval_max_dets=100,
             run_test=False,
 

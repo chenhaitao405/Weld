@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image
 
 from convert.pj.yolo_roi_extractor import WeldROIDetector
-from rfdetr import RFDETRMedium, RFDETRLarge, RFDETRSegPreview, RFDETRSegXLarge,RFDETRSeg2XLarge
+from rfdetr import RFDETRMedium, RFDETRLarge, RFDETRSegPreview, RFDETRSegXLarge,RFDETRSeg2XLarge,RFDETR2XLarge
 from utils import enhance_image
 from utils.pipeline_utils import (
     FontRenderer,
@@ -123,7 +123,7 @@ class RFDetrDetectionModel:
             model_kwargs["device"] = device
         if self.model_variant == "medium":
             return RFDETRMedium(**model_kwargs)
-        return RFDETRLarge(**model_kwargs)
+        return RFDETR2XLarge(**model_kwargs)
 
     def _build_class_map(self) -> Dict[int, str]:
         raw_names = getattr(self.model, "class_names", None)
@@ -169,7 +169,7 @@ class RFDetrSegmentationModel:
         kwargs: Dict[str, Any] = {"pretrain_weights": str(self.model_path)}
         if device:
             kwargs["device"] = device
-        self.model = RFDETRSegXLarge(**kwargs)
+        self.model = RFDETRSeg2XLarge(**kwargs)
         self.class_map = self._build_class_map()
 
     def _build_class_map(self) -> Dict[int, str]:
