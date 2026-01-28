@@ -1,13 +1,15 @@
 preprocess:
   profile: pair_1120_1208
   seed: 42
-  output_base_dir: data/pipeline_pair_1120_primary
+  output_base_dir: data/pipeline_pair_1120
   steps: 123456
   dataset_pairs:
   - image_root: datasets/images/1120
     label_root: datasets/labels/1120
 #  - image_root: datasets/images/1208
 #    label_root: datasets/labels/1208
+#  - image_root: datasets/images/nocrack
+#    label_root: datasets/labels/nocrack
   labelme2yolo:
     seg: true
     unify_to_crack: false
@@ -22,8 +24,8 @@ preprocess:
     enhance_mode: windowing
     slice_mode: 3
     window_size:
-    - 640
-    - 640
+    - 1120
+    - 1120
     label_mode: seg
   seg2det:
     mode: det

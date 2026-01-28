@@ -443,27 +443,28 @@ class Labelme2YOLO:
                         # 获取YOLO标注
                         yolo_obj_list = self._get_yolo_object_list(json_data)
 
+                        # 准备标签文件名（也要替换顿号，添加目录前缀）
+                        json_stem = Path(json_name).stem
+                        sanitized_stem = self._sanitize_filename(json_stem)
+
+                        # 添加目录前缀
+                        final_stem = f"{self._dir_prefix}{sanitized_stem}"
+
+                        # 记录重命名统计
+                        if json_stem != final_stem:
+                            stats[split_name]['renamed'] += 1
+
+                        # 保存标注（使用带前缀的文件名）
+                        label_path = os.path.join(
+                            self._label_dir_path, target_dir,
+                            final_stem + '.txt'
+                        )
+                        save_yolo_labels(
+                            yolo_obj_list, label_path,
+                            'seg' if self._to_seg else 'det'
+                        )
+
                         if yolo_obj_list:
-                            # 准备标签文件名（也要替换顿号，添加目录前缀）
-                            json_stem = Path(json_name).stem
-                            sanitized_stem = self._sanitize_filename(json_stem)
-
-                            # 添加目录前缀
-                            final_stem = f"{self._dir_prefix}{sanitized_stem}"
-
-                            # 记录重命名统计
-                            if json_stem != final_stem:
-                                stats[split_name]['renamed'] += 1
-
-                            # 保存标注（使用带前缀的文件名）
-                            label_path = os.path.join(
-                                self._label_dir_path, target_dir,
-                                final_stem + '.txt'
-                            )
-                            save_yolo_labels(
-                                yolo_obj_list, label_path,
-                                'seg' if self._to_seg else 'det'
-                            )
                             stats[split_name]['success'] += 1
                         else:
                             stats[split_name]['no_labels'] += 1

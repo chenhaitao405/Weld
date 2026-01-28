@@ -37,28 +37,28 @@ stages:
       size: 1469
     - path: datasets/images
       hash: md5
-      md5: 72ef397db917831a1df2c8d87ad87a7f.dir
-      size: 8675689056
-      nfiles: 2451
+      md5: d42300cf166cd8679895f4eb2b03e3f8.dir
+      size: 9851960588
+      nfiles: 3723
     - path: datasets/labels
       hash: md5
-      md5: 8e4e20240cba89ff8e1a2e480b53e7f1.dir
-      size: 2178409187
-      nfiles: 1071
+      md5: 5ca31259eb3adad5de6c8b800fc77f9c.dir
+      size: 2178622066
+      nfiles: 2343
     - path: params.yaml
       hash: md5
-      md5: d43092272f664800e34e1f3b30d23dc6
-      size: 1628
+      md5: ab76dd275fa3726c0fa0bd76cac17474
+      size: 1710
     - path: run_data_pipeline.py
       hash: md5
-      md5: 2191255a81c494ba29d1d012ab88c2da
-      size: 38011
+      md5: 956efc7c6665cabe75e04a21b4f041ef
+      size: 39356
     params:
       params.yaml:
         preprocess:
           profile: pair_1120_1208
           seed: 42
-          output_base_dir: data/pipeline_pair_1120_primary
+          output_base_dir: data/pipeline_pair_patch/1120
           steps: 123456
           dataset_pairs:
           - image_root: datasets/images/1120
@@ -75,10 +75,10 @@ stages:
           patchandenhance:
             overlap: 0.7
             enhance_mode: windowing
-            slice_mode: 3
+            slice_mode: 2
             window_size:
-            - 640
-            - 640
+            - 1120
+            - 1120
             label_mode: seg
           seg2det:
             mode: det
@@ -97,8 +97,8 @@ stages:
             merge_ratio:
             - 1.0
     outs:
-    - path: data/pipeline_pair_1120_primary
+    - path: data/pipeline_pair_patch/1120
       hash: md5
-      md5: cc809ec2935d534b25b184b9af8f5bc3.dir
-      size: 6837909359
-      nfiles: 11898
+      md5: 3b408a7bd22b4ecafb6e5734876f6614.dir
+      size: 7582061438
+      nfiles: 22593

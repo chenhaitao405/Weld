@@ -202,16 +202,21 @@ def _has_json_files(target_dir: str) -> bool:
 
 
 def _resolve_label_dir(base_dir: str) -> str:
-    """优先使用 base_dir/label，否则回退到 base_dir。"""
+    """优先使用 base_dir/label 或 base_dir/labels，否则回退到 base_dir。"""
     if not base_dir or not os.path.isdir(base_dir):
         return ""
     label_dir = os.path.join(base_dir, "label")
+    labels_dir = os.path.join(base_dir, "labels")
     if _has_json_files(label_dir):
         return label_dir
+    if _has_json_files(labels_dir):
+        return labels_dir
     if _has_json_files(base_dir):
         return base_dir
     if os.path.isdir(label_dir):
         return label_dir
+    if os.path.isdir(labels_dir):
+        return labels_dir
     return base_dir
 
 
@@ -230,10 +235,35 @@ def _discover_dataset_items_from_pairs(pairs: List[Dict[str, str]]) -> List[Dict
             print(f"⚠️ 跳过 {image_root}：图像目录不存在")
             continue
 
+        direct_json_dir = _resolve_label_dir(label_root)
+        if _has_json_files(direct_json_dir):
+            if not os.path.isdir(image_root):
+                print(f"⚠️ 跳过 {pair_tag}：图像目录不存在 {image_root}")
+                continue
+            name = pair_tag or os.path.basename(label_root.rstrip(os.sep)) or os.path.basename(image_root.rstrip(os.sep))
+            items.append({
+                "name": name,
+                "json_dir": direct_json_dir,
+                "image_dir": image_root
+            })
+            continue
+
         subdirs = sorted([name for name in os.listdir(label_root)
                           if os.path.isdir(os.path.join(label_root, name))])
         if not subdirs:
-            print(f"⚠️ 未在 {label_root} 下找到子目录")
+            json_dir = _resolve_label_dir(label_root)
+            if not _has_json_files(json_dir):
+                print(f"⚠️ 未在 {label_root} 下找到子目录，且未找到JSON标注文件")
+                continue
+            if not os.path.isdir(image_root):
+                print(f"⚠️ 跳过 {pair_tag}：图像目录不存在 {image_root}")
+                continue
+            name = pair_tag or os.path.basename(label_root.rstrip(os.sep)) or os.path.basename(image_root.rstrip(os.sep))
+            items.append({
+                "name": name,
+                "json_dir": json_dir,
+                "image_dir": image_root
+            })
             continue
 
         for sub in subdirs:
