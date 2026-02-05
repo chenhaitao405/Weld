@@ -29,15 +29,16 @@ model = RFDETR2XLarge()
 # 1120DATASET 1208+1120 /datasets/PAR/Weld/data/datasets_merge/1120_1208/coco_det
         #####           /datasets/PAR/Weld/data/datasets_merge/1120_1208_primary/coco_det
 
-DEFAULT_DATASET_DIR = "/datasets/PAR/Weld/data/datasets_merge/1120_1208_primary_nocrack/coco_det"
-DEFAULT_EPOCHS = 500
+DEFAULT_DATASET_DIR = "/datasets/PAR/Weld/data/pipeline_pair_1120_mannualval/coco_from_patch"
 DEFAULT_BATCH_SIZE = 4
 DEFAULT_GRAD_ACCUM_STEPS = 64
 DEFAULT_LR = 1e-4
-DEFAULT_OUTPUT_DIR = "outputs/RFDETR2XLarge/pipeline_SWRDpatch"
+DEFAULT_OUTPUT_DIR = "outputs/RFDETR2XLarge/pipeline_SWRDpatch/manual_val"
 DEFAULT_EARLY_STOPPING = True
-DEFAULT_RUN_NAME = "nocrack_1208"
-DEFAULT_RESUME = "/datasets/PAR/Weld/outputs/RFDETR2XLarge/pipeline_SWRDpatch/1208/checkpoint_best_regular.pth"
+DEFAULT_RUN_NAME = "1120_3"
+DEFAULT_EPOCHS = 500
+## 预训练模型 /datasets/PAR/Weld/outputs/RFDETR2XLarge/patch640_ratio_1/checkpoint_best_regular.pth
+DEFAULT_RESUME = "/datasets/PAR/Weld/outputs/RFDETR2XLarge/patch640_ratio_1/checkpoint_best_regular.pth"
 DEFAULT_METRICS_PATH = "metrics/rfdetr.json"
 DEFAULT_KEEP_BEST_ONLY = False
 

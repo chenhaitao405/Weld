@@ -16,13 +16,8 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 dataprocess_dir = os.path.dirname(current_dir)
 sys.path.append(dataprocess_dir)
 
-from utils import (
-    read_labelme_json,
-    save_yolo_labels,
-    train_val_split,
-    create_dataset_yaml,
-    find_image_files
-)
+from utils.label_processing import read_labelme_json, save_yolo_labels
+from utils.dataset_management import train_val_split
 from utils.constants import IMAGE_EXTENSIONS
 
 
@@ -54,6 +49,53 @@ class Labelme2YOLO:
             if dir_name:
                 return f"{dir_name}_"
         return ""
+
+    def _build_output_stem(self, json_name):
+        """Build the output stem used for labels (with prefix + sanitization)."""
+        json_stem = Path(json_name).stem
+        sanitized_stem = self._sanitize_filename(json_stem)
+        return f"{self._dir_prefix}{sanitized_stem}"
+
+    def _load_val_manifest(self, manifest_path):
+        """Load val manifest JSON and return a set of normalized stems."""
+        manifest_file = Path(manifest_path)
+        if not manifest_file.exists():
+            raise FileNotFoundError(f"val manifest not found: {manifest_file}")
+
+        with manifest_file.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        if isinstance(payload, dict):
+            if "val" in payload:
+                entries = payload["val"]
+            elif "val_list" in payload:
+                entries = payload["val_list"]
+            else:
+                raise ValueError("val manifest dict must contain 'val' or 'val_list'")
+        elif isinstance(payload, list):
+            entries = payload
+        else:
+            raise ValueError("val manifest must be a list or a dict with 'val' key")
+
+        if not isinstance(entries, list):
+            raise ValueError("val manifest entries must be a list")
+
+        normalized = set()
+        skipped = 0
+        for item in entries:
+            if not isinstance(item, str):
+                skipped += 1
+                continue
+            name = Path(item).name
+            stem = Path(name).stem
+            stem = self._sanitize_filename(stem)
+            if stem:
+                normalized.add(stem)
+
+        if skipped:
+            print(f"Warning: skipped {skipped} non-string entries in val manifest")
+
+        return normalized
 
     def __init__(self, json_dir, to_seg=False, filter_label=None,
                  unify_to_crack=False, output_dir=None, image_dir=None,
@@ -380,7 +422,7 @@ class Labelme2YOLO:
 
         return str(dst_img_path)
 
-    def convert(self, val_size, seed=None):
+    def convert(self, val_size, seed=None, val_manifest=None):
         """执行转换"""
         # 获取所有JSON文件
         json_names = [f for f in os.listdir(self._json_dir)
@@ -393,8 +435,32 @@ class Labelme2YOLO:
         print(f"\n找到 {len(json_names)} 个JSON文件")
 
         # 划分训练集和验证集
-        split_seed = 42 if seed is None else int(seed)
-        train_json_names, val_json_names = train_val_split(json_names, val_size, random_seed=split_seed)
+        if val_manifest:
+            val_set = self._load_val_manifest(val_manifest)
+            print(f"\nUsing val manifest: {val_manifest}")
+            print(f"Val manifest entries: {len(val_set)}")
+
+            train_json_names = []
+            val_json_names = []
+            matched = set()
+            for json_name in json_names:
+                output_stem = self._build_output_stem(json_name)
+                if output_stem in val_set:
+                    val_json_names.append(json_name)
+                    matched.add(output_stem)
+                else:
+                    train_json_names.append(json_name)
+
+            missing = val_set - matched
+            if missing:
+                sample = list(sorted(missing))[:10]
+                print(
+                    f"Warning: {len(missing)} val entries not found in json_dir. "
+                    f"Example: {', '.join(sample)}"
+                )
+        else:
+            split_seed = 42 if seed is None else int(seed)
+            train_json_names, val_json_names = train_val_split(json_names, val_size, random_seed=split_seed)
 
         print(f"训练集: {len(train_json_names)} 个文件")
         print(f"验证集: {len(val_json_names)} 个文件")
@@ -444,13 +510,10 @@ class Labelme2YOLO:
                         yolo_obj_list = self._get_yolo_object_list(json_data)
 
                         # 准备标签文件名（也要替换顿号，添加目录前缀）
-                        json_stem = Path(json_name).stem
-                        sanitized_stem = self._sanitize_filename(json_stem)
-
-                        # 添加目录前缀
-                        final_stem = f"{self._dir_prefix}{sanitized_stem}"
+                        final_stem = self._build_output_stem(json_name)
 
                         # 记录重命名统计
+                        json_stem = Path(json_name).stem
                         if json_stem != final_stem:
                             stats[split_name]['renamed'] += 1
 
@@ -573,6 +636,9 @@ def main():
   # 使用预定义的标签映射（JSON格式，用于批处理）
   python labelme2yolo.py --json_dir ./labelme_data --label_map '{"crack": 0, "scratch": 1}'
 
+  # 使用验证集清单（JSON只记录val条目，其余全部进入train）
+  python labelme2yolo.py --json_dir ./labelme_data --val_manifest ./val_manifest.json
+
 注意：
   - 默认会添加目录前缀，使用 --no_prefix 可以禁用
   - --unify_to_crack 会将所有标签统一为'crack'，适用于二分类任务
@@ -599,6 +665,8 @@ def main():
                         help='输出目录 (默认: json_dir/YOLODataset[_seg])')
     parser.add_argument('--label_map', type=str, default=None,
                         help='预定义的标签映射（JSON格式字符串，批处理用）')
+    parser.add_argument('--val_manifest', type=str, default=None,
+                        help='JSON manifest listing val stems (all others go to train)')
     parser.add_argument('--no_prefix', action='store_true',
                         help='不添加目录前缀到文件名')
     parser.add_argument('--seed', type=int, default=None,
@@ -634,7 +702,7 @@ def main():
     )
 
     # 执行转换
-    converter.convert(val_size=args.val_size, seed=args.seed)
+    converter.convert(val_size=args.val_size, seed=args.seed, val_manifest=args.val_manifest)
 
 
 if __name__ == '__main__':

@@ -195,8 +195,15 @@ def _normalize_dataset_pairs(raw_pairs: List[Dict[str, str]], base_dir: str) -> 
 def _has_json_files(target_dir: str) -> bool:
     if not target_dir or not os.path.isdir(target_dir):
         return False
+    ignore_names = {
+        "val_manifest.json",
+        "train_manifest.json",
+        "manifest.json",
+    }
     for name in os.listdir(target_dir):
         if name.endswith(".json"):
+            if name in ignore_names or name.endswith("_manifest.json"):
+                continue
             return True
     return False
 
@@ -728,6 +735,10 @@ def process_labelme2yolo_unified(dataset_items: List[Dict[str, str]], output_dir
             "--output_dir", output_dir,
             "--label_map", json.dumps(dict(label_map))  # 传递统一的标签映射
         ]
+
+        val_manifest = FIXED_PARAMS["labelme2yolo"].get("val_manifest")
+        if val_manifest:
+            command.extend(["--val_manifest", str(val_manifest)])
 
         if FIXED_PARAMS["labelme2yolo"]["seg"]:
             command.append("--seg")

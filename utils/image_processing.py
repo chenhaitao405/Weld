@@ -8,7 +8,6 @@
 import cv2
 import numpy as np
 from typing import List, Dict, Tuple, Optional
-from numba import jit
 
 
 def apply_window_level(image: np.ndarray, window_width: int,
