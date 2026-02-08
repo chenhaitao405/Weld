@@ -26,7 +26,7 @@ sys.path.append(dataprocess_dir)
 
 from utils import (
     # 图像处理
-    enhance_image, sliding_window_crop, calculate_stride,
+    enhance_image, sliding_window_crop_raw, center_pad_to_window, letterbox_to_window, calculate_stride,
     # 标签处理
     read_yolo_labels, save_yolo_labels,
     denormalize_bbox, normalize_bbox,
@@ -102,10 +102,15 @@ class YOLOSlidingWindowProcessor:
     def _describe_slice_mode(self) -> str:
         descriptions = {
             1: "仅增强（不切片）",
-            2: "滑动窗口裁剪",
+            2: "自适应切片（宽图横切纵拼，其余滑窗）",
             3: "横切纵拼成方形"
         }
         return descriptions.get(self.slice_mode, "未知模式")
+
+    def _use_mode3(self, h: int, w: int) -> bool:
+        if h <= 0:
+            return False
+        return (w / h) >= MODE3_ASPECT_THRESHOLD
 
     def adjust_yolo_labels_for_crop(self, labels: List[List[float]],
                                     crop_x: int, crop_y: int,
@@ -183,6 +188,122 @@ class YOLOSlidingWindowProcessor:
                         adjusted_labels.append(new_label)
 
         return adjusted_labels
+
+    def _shift_labels_for_padding(self,
+                                  labels: List[List[float]],
+                                  crop_w: int, crop_h: int,
+                                  pad_left: int, pad_top: int,
+                                  window_w: int, window_h: int) -> List[List[float]]:
+        """将裁剪后的标签坐标平移到居中填充后的窗口坐标系。"""
+        shifted: List[List[float]] = []
+
+        if self.label_mode == 'det':
+            for label in labels:
+                if len(label) < 5:
+                    continue
+                class_id = int(label[0])
+                x_center_px = label[1] * crop_w + pad_left
+                y_center_px = label[2] * crop_h + pad_top
+                width_px = label[3] * crop_w
+                height_px = label[4] * crop_h
+
+                new_x = x_center_px / window_w
+                new_y = y_center_px / window_h
+                new_w = width_px / window_w
+                new_h = height_px / window_h
+
+                shifted.append([class_id, new_x, new_y, new_w, new_h])
+
+        elif self.label_mode == 'seg':
+            for label in labels:
+                if len(label) < 7:
+                    continue
+                class_id = int(label[0])
+                points = label[1:]
+                new_points: List[float] = []
+                for i in range(0, len(points), 2):
+                    if i + 1 >= len(points):
+                        break
+                    x_px = points[i] * crop_w + pad_left
+                    y_px = points[i + 1] * crop_h + pad_top
+                    new_points.extend([x_px / window_w, y_px / window_h])
+                shifted.append([class_id] + new_points)
+
+        return shifted
+
+    def _letterbox_labels(self,
+                          labels: List[List[float]],
+                          original_w: int, original_h: int,
+                          scale: float,
+                          pad_left: int, pad_top: int,
+                          window_w: int, window_h: int) -> List[List[float]]:
+        """将原图标签按等比缩放+居中填充映射到目标窗口坐标系。"""
+        adjusted: List[List[float]] = []
+
+        if self.label_mode == 'det':
+            for label in labels:
+                if len(label) < 5:
+                    continue
+                class_id = int(label[0])
+                x_center_px = label[1] * original_w * scale + pad_left
+                y_center_px = label[2] * original_h * scale + pad_top
+                width_px = label[3] * original_w * scale
+                height_px = label[4] * original_h * scale
+
+                new_x = x_center_px / window_w
+                new_y = y_center_px / window_h
+                new_w = width_px / window_w
+                new_h = height_px / window_h
+
+                adjusted.append([class_id, new_x, new_y, new_w, new_h])
+
+        elif self.label_mode == 'seg':
+            for label in labels:
+                if len(label) < 7:
+                    continue
+                class_id = int(label[0])
+                points = label[1:]
+                new_points: List[float] = []
+                for i in range(0, len(points), 2):
+                    if i + 1 >= len(points):
+                        break
+                    x_px = points[i] * original_w * scale + pad_left
+                    y_px = points[i + 1] * original_h * scale + pad_top
+                    new_points.extend([x_px / window_w, y_px / window_h])
+                adjusted.append([class_id] + new_points)
+
+        return adjusted
+
+    def _save_padded_full_image(self,
+                                image: np.ndarray,
+                                labels: List[List[float]],
+                                output_image_dir: str,
+                                output_label_dir: str,
+                                base_name: str,
+                                window_size: Tuple[int, int]) -> Dict[str, int]:
+        """保存等比缩放+居中填充后的完整图像与标签。"""
+        enhanced = enhance_image(image, self.enhance_mode)
+        padded, scale, pad_left, pad_top = letterbox_to_window(enhanced, window_size)
+
+        h, w = image.shape[:2]
+        window_h, window_w = window_size
+        adjusted_labels = self._letterbox_labels(
+            labels, w, h, scale, pad_left, pad_top, window_w, window_h
+        )
+
+        name = f"{base_name}_sq{window_w}"
+        image_save_path = Path(output_image_dir) / f"{name}.jpg"
+        label_save_path = Path(output_label_dir) / f"{name}.txt"
+        cv2.imwrite(str(image_save_path), padded,
+                    [cv2.IMWRITE_JPEG_QUALITY, DEFAULT_JPEG_QUALITY])
+        save_yolo_labels(adjusted_labels, str(label_save_path), self.label_mode)
+
+        stats = {'processed': 1, 'with_defects': 0, 'without_defects': 0}
+        if len(adjusted_labels) > 0:
+            stats['with_defects'] = 1
+        else:
+            stats['without_defects'] = 1
+        return stats
 
     def process_single_image_no_slice(self, image_path: str, label_path: str,
                                       output_image_dir: str, output_label_dir: str) -> Dict:
@@ -336,7 +457,8 @@ class YOLOSlidingWindowProcessor:
 
     def process_single_image_mode3(self, image_path: str, label_path: str,
                                    output_image_dir: str,
-                                   output_label_dir: str) -> Dict[str, int]:
+                                   output_label_dir: str,
+                                   save_full: bool = True) -> Dict[str, int]:
         """模式3：横切纵拼生成方形"""
         image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         if image is None:
@@ -364,32 +486,21 @@ class YOLOSlidingWindowProcessor:
                 stats[key] += result[key]
 
         if not plan.is_wide:
-            output_name = f"{base_name}_sq1120"
-            full_enhanced = enhance_image(image, self.enhance_mode)
-            result = self._save_mode3_output(
-                full_enhanced,
-                patches[0]['labels'],
-                output_image_dir,
-                output_label_dir,
-                output_name
-            )
-            update_stats(result)
+            if save_full:
+                result = self._save_padded_full_image(
+                    image, labels, output_image_dir, output_label_dir,
+                    base_name, (MODE3_TARGET_SIZE, MODE3_TARGET_SIZE)
+                )
+                update_stats(result)
             return stats
 
-        # 宽图场景：保留一份原图（方形）以覆盖主分支输入
-        output_name = f"{base_name}_sq1120"
-        full_enhanced = enhance_image(image, self.enhance_mode)
-        full_labels = self.adjust_yolo_labels_for_crop(
-            labels, 0, 0, w, h, w, h
-        )
-        result = self._save_mode3_output(
-            full_enhanced,
-            full_labels,
-            output_image_dir,
-            output_label_dir,
-            output_name
-        )
-        update_stats(result)
+        # 宽图场景：按需保留一份等比填充后的原图
+        if save_full:
+            result = self._save_padded_full_image(
+                image, labels, output_image_dir, output_label_dir,
+                base_name, (MODE3_TARGET_SIZE, MODE3_TARGET_SIZE)
+            )
+            update_stats(result)
 
         # 先切片，再对每个切片单独增强，确保拼接前的图像质量一致
         for entry in patches:
@@ -446,6 +557,59 @@ class YOLOSlidingWindowProcessor:
 
         return stats
 
+    def process_single_image_mode2(self, image_path: str, label_path: str,
+                                   output_image_dir: str, output_label_dir: str,
+                                   window_size: Tuple[int, int] = None) -> Dict:
+        """模式2：滑动窗口裁剪"""
+        image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        if image is None:
+            print(f"无法读取图像: {image_path}")
+            return {'processed': 0, 'with_defects': 0, 'without_defects': 0}
+
+        h, w = image.shape[:2]
+
+        labels = read_yolo_labels(label_path, self.label_mode)
+
+        if window_size is None:
+            window_size = min(DEFAULT_WINDOW_SIZE, min(h, w))
+            window_size = (window_size, window_size)
+
+        stride = calculate_stride(window_size, self.overlap_ratio)
+        patches = sliding_window_crop_raw(image, window_size, stride)
+
+        stats = {'processed': 0, 'with_defects': 0, 'without_defects': 0}
+
+        base_name = Path(image_path).stem
+        for i, patch_info in enumerate(patches):
+            enhanced_patch = enhance_image(patch_info['patch'], self.enhance_mode)
+            padded_patch, pad_left, pad_top = center_pad_to_window(enhanced_patch, window_size)
+
+            x, y = patch_info['position']
+            patch_h, patch_w = patch_info['raw_size']
+            adjusted_labels = self.adjust_yolo_labels_for_crop(
+                labels, x, y, patch_w, patch_h, w, h
+            )
+            window_h, window_w = window_size
+            adjusted_labels = self._shift_labels_for_padding(
+                adjusted_labels, patch_w, patch_h, pad_left, pad_top, window_w, window_h
+            )
+
+            patch_name = f"{base_name}_patch_{i:04d}"
+            image_save_path = Path(output_image_dir) / f"{patch_name}.jpg"
+            cv2.imwrite(str(image_save_path), padded_patch,
+                        [cv2.IMWRITE_JPEG_QUALITY, DEFAULT_JPEG_QUALITY])
+
+            label_save_path = Path(output_label_dir) / f"{patch_name}.txt"
+            save_yolo_labels(adjusted_labels, str(label_save_path), self.label_mode)
+
+            stats['processed'] += 1
+            if len(adjusted_labels) > 0:
+                stats['with_defects'] += 1
+            else:
+                stats['without_defects'] += 1
+
+        return stats
+
     def process_single_image(self, image_path: str, label_path: str,
                              output_image_dir: str, output_label_dir: str,
                              window_size: Tuple[int, int] = None) -> Dict:
@@ -472,65 +636,35 @@ class YOLOSlidingWindowProcessor:
                 image_path, label_path, output_image_dir, output_label_dir
             )
 
-        # 模式2：原有的切片处理逻辑
-        # 读取图像
+        # slice_mode=2: 宽图采用模式3，其余走滑窗模式2
         image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
         if image is None:
             print(f"无法读取图像: {image_path}")
             return {'processed': 0, 'with_defects': 0, 'without_defects': 0}
-
         h, w = image.shape[:2]
-
-        # 读取YOLO标签
         labels = read_yolo_labels(label_path, self.label_mode)
 
-        # 确定滑动窗口大小
+        # 先保存等比填充后的完整图像（保证训练/推理分布一致）
         if window_size is None:
             window_size = min(DEFAULT_WINDOW_SIZE, min(h, w))
             window_size = (window_size, window_size)
-
-        # 计算步长
-        stride = calculate_stride(window_size, self.overlap_ratio)
-
-        # 滑动窗口裁剪
-        patches = sliding_window_crop(image, window_size, stride)
-
-        # 统计信息
-        stats = {'processed': 0, 'with_defects': 0, 'without_defects': 0}
-
-        # 处理每个patch
-        base_name = Path(image_path).stem
-        for i, patch_info in enumerate(patches):
-            # 图像增强
-            enhanced_patch = enhance_image(patch_info['patch'], self.enhance_mode)
-
-            # 调整标签
-            x, y = patch_info['position']
-            patch_w, patch_h = patch_info['size']
-            adjusted_labels = self.adjust_yolo_labels_for_crop(
-                labels, x, y, patch_w, patch_h, w, h
+        full_stats = self._save_padded_full_image(
+            image, labels, output_image_dir, output_label_dir,
+            Path(image_path).stem, window_size
+        )
+        if self._use_mode3(h, w):
+            mode_stats = self.process_single_image_mode3(
+                image_path, label_path, output_image_dir, output_label_dir, save_full=False
+            )
+        else:
+            mode_stats = self.process_single_image_mode2(
+                image_path, label_path, output_image_dir, output_label_dir,
+                window_size=window_size
             )
 
-            # 生成文件名
-            patch_name = f"{base_name}_patch_{i:04d}"
-
-            # 保存图像
-            image_save_path = Path(output_image_dir) / f"{patch_name}.jpg"
-            cv2.imwrite(str(image_save_path), enhanced_patch,
-                        [cv2.IMWRITE_JPEG_QUALITY, DEFAULT_JPEG_QUALITY])
-
-            # 保存标签
-            label_save_path = Path(output_label_dir) / f"{patch_name}.txt"
-            save_yolo_labels(adjusted_labels, str(label_save_path), self.label_mode)
-
-            # 更新统计
-            stats['processed'] += 1
-            if len(adjusted_labels) > 0:
-                stats['with_defects'] += 1
-            else:
-                stats['without_defects'] += 1
-
-        return stats
+        for key in full_stats:
+            full_stats[key] += mode_stats.get(key, 0)
+        return full_stats
 
     def process_dataset(self, input_dir: str, output_dir: str,
                         window_size: Tuple[int, int] = None):
@@ -559,6 +693,7 @@ class YOLOSlidingWindowProcessor:
         if self.slice_mode == 2:
             print(f"  - 窗口大小: {window_size if window_size else '自动'}")
             print(f"  - 重叠率: {self.overlap_ratio}")
+            print(f"  - 宽图阈值: {MODE3_ASPECT_THRESHOLD} (触发模式3)")
         elif self.slice_mode == 3:
             print(f"  - 模式3窗口宽度系数: {MODE3_WINDOW_RATIO}")
             print(f"  - 模式3滑动重叠率: {MODE3_OVERLAP}")
@@ -635,6 +770,7 @@ class YOLOSlidingWindowProcessor:
             if self.slice_mode == 2:
                 preprocessing_info['window_size'] = list(window_size) if window_size else 'auto'
                 preprocessing_info['overlap_ratio'] = self.overlap_ratio
+                preprocessing_info['mode3_aspect_threshold'] = MODE3_ASPECT_THRESHOLD
             elif self.slice_mode == 3:
                 preprocessing_info['mode3'] = {
                     'target_size': MODE3_TARGET_SIZE,

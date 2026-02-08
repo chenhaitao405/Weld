@@ -25,20 +25,24 @@ model = RFDETR2XLarge()
 #预训练数据 /datasets/PAR/Xray/datasets_merge/patch640_ratio_1
 # SWRD DATSET /datasets/PAR/Xray/opensource/SWRD8bit/swr_pipeline/patch_det_coco
 #############/datasets/PAR/Xray/opensource/SWRD8bit/swr_pipeline/coco_patch_det_slice3
-# 1120DATASET /datasets/PAR/Weld/data/pipeline_pair_1120/coco_from_patch
+# 1120DATASET /datasets/PAR/Weld/data/pipeline_pair_1120/coco_from_patch\
+# "/datasets/PAR/Weld/data/pipeline_pair_1120_mannualval/coco_from_patch"
 # 1120DATASET 1208+1120 /datasets/PAR/Weld/data/datasets_merge/1120_1208/coco_det
         #####           /datasets/PAR/Weld/data/datasets_merge/1120_1208_primary/coco_det
+        #/datasets/PAR/Weld/data/datasets_merge/1208_1120_mannual_swrdslice3/coco_det
 
-DEFAULT_DATASET_DIR = "/datasets/PAR/Weld/data/pipeline_pair_1120_mannualval/coco_from_patch"
+##/datasets/PAR/Weld/data/pipeline_pair_1120_mannualval_patch880_enhance/coco_from_patch
+
+DEFAULT_DATASET_DIR = "/datasets/PAR/Weld/data/pipeline_pair_1120_mannualval_patch880_enhance/coco_from_patch"
 DEFAULT_BATCH_SIZE = 4
 DEFAULT_GRAD_ACCUM_STEPS = 64
 DEFAULT_LR = 1e-4
-DEFAULT_OUTPUT_DIR = "outputs/RFDETR2XLarge/pipeline_SWRDpatch/manual_val"
+DEFAULT_OUTPUT_DIR = "outputs/RFDETR2XLarge/pipeline_SWRDpatch/manual_val/windowingtest"
 DEFAULT_EARLY_STOPPING = True
-DEFAULT_RUN_NAME = "1120_3"
+DEFAULT_RUN_NAME = "1120_1120_SWRD_patch_enhance"
 DEFAULT_EPOCHS = 500
 ## 预训练模型 /datasets/PAR/Weld/outputs/RFDETR2XLarge/patch640_ratio_1/checkpoint_best_regular.pth
-DEFAULT_RESUME = "/datasets/PAR/Weld/outputs/RFDETR2XLarge/patch640_ratio_1/checkpoint_best_regular.pth"
+DEFAULT_RESUME = "/datasets/PAR/Weld/outputs/RFDETR2XLarge/patch640_ratio_1/checkpoint_best_regular.pth" #"/datasets/PAR/Weld/outputs/RFDETR2XLarge/pipeline_SWRDpatch/manual_val/1120_SWRD/checkpoint_best_total.pth"
 DEFAULT_METRICS_PATH = "metrics/rfdetr.json"
 DEFAULT_KEEP_BEST_ONLY = False
 

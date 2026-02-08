@@ -10,7 +10,7 @@ from PIL import Image
 
 from convert.pj.yolo_roi_extractor import WeldROIDetector
 from rfdetr import RFDETRMedium, RFDETRLarge, RFDETRSegPreview, RFDETRSegXLarge,RFDETRSeg2XLarge,RFDETR2XLarge
-from utils import enhance_image
+from utils import enhance_image, calculate_stride, sliding_window_crop_raw, center_pad_to_window, letterbox_to_window
 from utils.pipeline_utils import (
     FontRenderer,
     align_roi_orientation,
@@ -128,6 +128,9 @@ class RFDetrDetectionModel:
     def _build_class_map(self) -> Dict[int, str]:
         raw_names = getattr(self.model, "class_names", None)
         if isinstance(raw_names, dict):
+            keys = [int(k) for k in raw_names.keys()]
+            if 0 not in keys and 1 in keys:
+                return {int(k) - 1: str(v) for k, v in raw_names.items()}
             return {int(k): str(v) for k, v in raw_names.items()}
         if isinstance(raw_names, (list, tuple)):
             return {idx: str(name) for idx, name in enumerate(raw_names)}
@@ -175,6 +178,9 @@ class RFDetrSegmentationModel:
     def _build_class_map(self) -> Dict[int, str]:
         raw_names = getattr(self.model, "class_names", None)
         if isinstance(raw_names, dict):
+            keys = [int(k) for k in raw_names.keys()]
+            if 0 not in keys and 1 in keys:
+                return {int(k) - 1: str(v) for k, v in raw_names.items()}
             return {int(k): str(v) for k, v in raw_names.items()}
         if isinstance(raw_names, (list, tuple)):
             return {idx: str(name) for idx, name in enumerate(raw_names)}
@@ -254,12 +260,18 @@ def process_roi_and_segmentation(
         roi_debug_dir = (debug_dir / f"roi_{roi_idx:02d}") if debug_dir else None
         aligned_roi, rotation_meta = align_roi_orientation(roi_patch)
         enhanced_roi = enhance_image(aligned_roi, mode=enhance_mode, output_bits=8)
-        prepared_roi = ensure_color(enhanced_roi)
+        roi_h, roi_w = enhanced_roi.shape[:2]
+        square_size = max(roi_h, roi_w)
+        padded_roi, pad_left, pad_top = center_pad_to_window(
+            enhanced_roi, (square_size, square_size)
+        )
+        prepared_roi = ensure_color(padded_roi)
         primary_defects, _ = seg_model.infer(prepared_roi, rotation_meta=rotation_meta,
                                              visualize=False, font_renderer=None)
         if roi_debug_dir is not None:
             _save_debug_image(prepared_roi, primary_defects,
                               roi_debug_dir / "primary_input.jpg", font_renderer)
+        primary_defects = _shift_defects_from_padding(primary_defects, pad_left, pad_top, roi_w, roi_h)
         primary_defects = _restore_segments_from_alignment(primary_defects, rotation_meta)
         mapped_primary = _map_to_image(primary_defects, x1_i, y1_i, img_w, img_h, source="primary")
 
@@ -281,6 +293,7 @@ def process_roi_and_segmentation(
         merged_defects = mapped_primary + wide_slice_mapped
         if wide_slice_mapped:
             merged_defects = _apply_classwise_nms(merged_defects, fusion_iou)
+        merged_defects = _suppress_contained_boxes(merged_defects)
 
         roi_payload: Dict[str, Any] = {
             "roi_index": roi_idx,
@@ -312,8 +325,8 @@ class WideSliceConfig:
     enabled: bool = False
     aspect_ratio_threshold: float = 3.0
     window_ratio: float = 2.0
-    overlap: float = 0.3
-    target_size: int = 1120
+    overlap: float = 0.5
+    target_size: int = 880
 
     def to_params(self) -> WideSliceParams:
         return WideSliceParams(
@@ -364,11 +377,17 @@ def _process_roi_and_detection(
 
         aligned_roi, rotation_meta = align_roi_orientation(roi_patch)
         enhanced_roi = enhance_image(aligned_roi, mode=enhance_mode, output_bits=8)
-        prepared_roi = ensure_color(enhanced_roi)
+        roi_h, roi_w = enhanced_roi.shape[:2]
+        square_size = max(roi_h, roi_w)
+        padded_roi, pad_left, pad_top = center_pad_to_window(
+            enhanced_roi, (square_size, square_size)
+        )
+        prepared_roi = ensure_color(padded_roi)
         detections_raw = detection_model.predict_patch(prepared_roi)
         if roi_debug_dir is not None:
             _save_debug_image(prepared_roi, detections_raw, roi_debug_dir / "primary_input.jpg", font_renderer)
-        detections = _restore_detections_from_alignment(detections_raw, rotation_meta)
+        detections = _shift_detections_from_padding(detections_raw, pad_left, pad_top, roi_w, roi_h)
+        detections = _restore_detections_from_alignment(detections, rotation_meta)
         mapped_detections = _map_to_image(detections, x1_i, y1_i, img_w, img_h, source="primary")
 
         wide_slice_mapped: List[Dict[str, Any]] = []
@@ -389,6 +408,7 @@ def _process_roi_and_detection(
         merged_detections = mapped_detections + wide_slice_mapped
         if wide_slice_mapped:
             merged_detections = _apply_classwise_nms(merged_detections, fusion_iou)
+        merged_detections = _suppress_contained_boxes(merged_detections)
 
         roi_payload = {
             "roi_index": roi_idx,
@@ -416,6 +436,56 @@ def _restore_detections_from_alignment(detections: List[Dict[str, Any]],
         new_det["bbox"] = restore_bbox_from_rotation(det["bbox"], rotation_meta)
         restored.append(new_det)
     return restored
+
+
+def _shift_detections_from_padding(detections: List[Dict[str, Any]],
+                                   pad_left: int,
+                                   pad_top: int,
+                                   roi_w: int,
+                                   roi_h: int) -> List[Dict[str, Any]]:
+    shifted: List[Dict[str, Any]] = []
+    for det in detections or []:
+        bbox = det.get("bbox")
+        if not bbox or len(bbox) != 4:
+            continue
+        new_det = det.copy()
+        new_det["bbox"] = [
+            float(np.clip(bbox[0] - pad_left, 0, roi_w)),
+            float(np.clip(bbox[1] - pad_top, 0, roi_h)),
+            float(np.clip(bbox[2] - pad_left, 0, roi_w)),
+            float(np.clip(bbox[3] - pad_top, 0, roi_h)),
+        ]
+        shifted.append(new_det)
+    return shifted
+
+
+def _shift_defects_from_padding(defects: List[Dict[str, Any]],
+                                pad_left: int,
+                                pad_top: int,
+                                roi_w: int,
+                                roi_h: int) -> List[Dict[str, Any]]:
+    shifted: List[Dict[str, Any]] = []
+    for defect in defects or []:
+        bbox = defect.get("bbox")
+        if not bbox or len(bbox) != 4:
+            continue
+        new_defect = defect.copy()
+        new_defect["bbox"] = [
+            float(np.clip(bbox[0] - pad_left, 0, roi_w)),
+            float(np.clip(bbox[1] - pad_top, 0, roi_h)),
+            float(np.clip(bbox[2] - pad_left, 0, roi_w)),
+            float(np.clip(bbox[3] - pad_top, 0, roi_h)),
+        ]
+        polygon = defect.get("polygon")
+        if polygon:
+            shifted_polygon = [
+                [float(pt[0] - pad_left), float(pt[1] - pad_top)]
+                for pt in polygon
+                if isinstance(pt, (list, tuple, np.ndarray)) and len(pt) >= 2
+            ]
+            new_defect["polygon"] = _offset_polygon(shifted_polygon, 0, 0, roi_w, roi_h)
+        shifted.append(new_defect)
+    return shifted
 
 
 def _restore_segments_from_alignment(defects: List[Dict[str, Any]],
@@ -482,13 +552,14 @@ def _run_wide_slice_detection(aligned_roi: np.ndarray,
     slice_idx = 0
 
     if not plan.is_wide:
-        solo_patch = plan.patches[0]
+        window_size = (target_size, target_size)
         detections.extend(
-            _detect_resized_slice(
-                patch=solo_patch,
+            _run_patch_window_detection(
+                aligned_roi=aligned_roi,
                 detection_model=detection_model,
-                target_size=target_size,
-                slice_index=slice_idx,
+                enhance_mode=enhance_mode,
+                window_size=window_size,
+                overlap=slice_cfg.overlap,
                 debug_dir=debug_dir,
                 font_renderer=font_renderer
             )
@@ -567,15 +638,14 @@ def _run_wide_slice_segmentation(aligned_roi: np.ndarray,
     slice_idx = 0
 
     if not plan.is_wide:
-        solo_patch = plan.patches[0]
+        window_size = (target_size, target_size)
         detections.extend(
-            _segment_resized_slice(
-                patch=solo_patch,
+            _run_patch_window_segmentation(
+                aligned_roi=aligned_roi,
                 seg_model=seg_model,
-                target_size=target_size,
-                roi_width=plan.roi_width,
-                roi_height=plan.roi_height,
-                slice_index=slice_idx,
+                enhance_mode=enhance_mode,
+                window_size=window_size,
+                overlap=slice_cfg.overlap,
                 debug_dir=debug_dir,
                 font_renderer=font_renderer
             )
@@ -645,8 +715,10 @@ def _segment_resized_slice(patch: WideSlicePatch,
                            font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
     if patch.width <= 0 or patch.height <= 0:
         return []
-    resized = resize_slice_to_square(patch.image, target_size)
-    prepared = ensure_color(resized)
+    padded, scale, pad_left, pad_top = letterbox_to_window(
+        patch.image, (target_size, target_size)
+    )
+    prepared = ensure_color(padded)
     raw_defects, _ = seg_model.infer(prepared, rotation_meta=None,
                                      visualize=False, font_renderer=None)
     if debug_dir is not None:
@@ -655,8 +727,7 @@ def _segment_resized_slice(patch: WideSlicePatch,
         _save_debug_image(prepared, raw_defects or [], det_path, font_renderer)
     if not raw_defects:
         return []
-    scale_x = patch.width / target_size
-    scale_y = patch.height / target_size
+
     defects: List[Dict[str, Any]] = []
 
     for defect in raw_defects:
@@ -665,10 +736,10 @@ def _segment_resized_slice(patch: WideSlicePatch,
             continue
         new_defect = defect.copy()
         new_defect["bbox"] = [
-            float(np.clip(bbox[0] * scale_x + patch.x_offset, 0, roi_width)),
-            float(np.clip(bbox[1] * scale_y, 0, roi_height)),
-            float(np.clip(bbox[2] * scale_x + patch.x_offset, 0, roi_width)),
-            float(np.clip(bbox[3] * scale_y, 0, roi_height))
+            float(np.clip((bbox[0] - pad_left) / scale + patch.x_offset, 0, roi_width)),
+            float(np.clip((bbox[1] - pad_top) / scale, 0, roi_height)),
+            float(np.clip((bbox[2] - pad_left) / scale + patch.x_offset, 0, roi_width)),
+            float(np.clip((bbox[3] - pad_top) / scale, 0, roi_height))
         ]
         polygon = defect.get("polygon")
         if polygon:
@@ -677,8 +748,8 @@ def _segment_resized_slice(patch: WideSlicePatch,
                 if not isinstance(pt, (list, tuple, np.ndarray)) or len(pt) < 2:
                     continue
                 mapped_polygon.append([
-                    float(np.clip(pt[0] * scale_x + patch.x_offset, 0, roi_width)),
-                    float(np.clip(pt[1] * scale_y, 0, roi_height))
+                    float(np.clip((pt[0] - pad_left) / scale + patch.x_offset, 0, roi_width)),
+                    float(np.clip((pt[1] - pad_top) / scale, 0, roi_height))
                 ])
             if mapped_polygon:
                 new_defect["polygon"] = mapped_polygon
@@ -697,8 +768,10 @@ def _segment_wide_pair_slice(top_patch: WideSlicePatch,
                              debug_dir: Optional[Path],
                              font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
     stacked = stack_wide_slice_pair(top_patch, bottom_patch)
-    resized = resize_slice_to_square(stacked, target_size)
-    prepared = ensure_color(resized)
+    padded, scale, pad_left, pad_top = letterbox_to_window(
+        stacked, (target_size, target_size)
+    )
+    prepared = ensure_color(padded)
     raw_defects, _ = seg_model.infer(prepared, rotation_meta=None,
                                      visualize=False, font_renderer=None)
     if debug_dir is not None:
@@ -708,19 +781,16 @@ def _segment_wide_pair_slice(top_patch: WideSlicePatch,
     if not raw_defects:
         return []
 
-    window_w = top_patch.width
-    scale_x = window_w / target_size
-    scale_y = (2 * roi_height) / target_size
     defects: List[Dict[str, Any]] = []
 
     for defect in raw_defects:
         bbox = defect.get("bbox")
         if not bbox or len(bbox) != 4:
             continue
-        x1 = bbox[0] * scale_x
-        y1 = bbox[1] * scale_y
-        x2 = bbox[2] * scale_x
-        y2 = bbox[3] * scale_y
+        x1 = (bbox[0] - pad_left) / scale
+        y1 = (bbox[1] - pad_top) / scale
+        x2 = (bbox[2] - pad_left) / scale
+        y2 = (bbox[3] - pad_top) / scale
         center_y = (y1 + y2) / 2.0
         if center_y < roi_height:
             x_offset = top_patch.x_offset
@@ -743,14 +813,114 @@ def _segment_wide_pair_slice(top_patch: WideSlicePatch,
                 if not isinstance(pt, (list, tuple, np.ndarray)) or len(pt) < 2:
                     continue
                 mapped_polygon.append([
-                    float(np.clip(pt[0] * scale_x + x_offset, 0, roi_width)),
-                    float(np.clip(pt[1] * scale_y + y_offset, 0, roi_height))
+                    float(np.clip((pt[0] - pad_left) / scale + x_offset, 0, roi_width)),
+                    float(np.clip((pt[1] - pad_top) / scale + y_offset, 0, roi_height))
                 ])
             if mapped_polygon:
                 new_defect["polygon"] = mapped_polygon
         new_defect["source"] = "wide_slice"
         defects.append(new_defect)
     return defects
+
+
+def _run_patch_window_detection(aligned_roi: np.ndarray,
+                                detection_model: RFDetrDetectionModel,
+                                enhance_mode: str,
+                                window_size: Tuple[int, int],
+                                overlap: float,
+                                debug_dir: Optional[Path],
+                                font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
+    if window_size is None:
+        return []
+
+    roi_h, roi_w = aligned_roi.shape[:2]
+    stride = calculate_stride(window_size, overlap)
+    patches = sliding_window_crop_raw(aligned_roi, window_size, stride)
+    detections: List[Dict[str, Any]] = []
+
+    for patch_idx, patch_info in enumerate(patches):
+        patch = patch_info["patch"]
+        px, py = patch_info["position"]
+        enhanced_patch = enhance_image(patch, mode=enhance_mode, output_bits=8)
+        padded_patch, pad_left, pad_top = center_pad_to_window(enhanced_patch, window_size)
+
+        patch_dets = detection_model.predict_patch(ensure_color(padded_patch))
+
+        if debug_dir is not None:
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            det_path = debug_dir / f"wideslice_patch_{patch_idx:04d}.jpg"
+            _save_debug_image(ensure_color(padded_patch), patch_dets, det_path, font_renderer)
+
+        for det in patch_dets:
+            bbox = det.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            new_det = det.copy()
+            new_det["bbox"] = [
+                float(np.clip(bbox[0] - pad_left + px, 0, roi_w)),
+                float(np.clip(bbox[1] - pad_top + py, 0, roi_h)),
+                float(np.clip(bbox[2] - pad_left + px, 0, roi_w)),
+                float(np.clip(bbox[3] - pad_top + py, 0, roi_h)),
+            ]
+            new_det["source"] = "wide_slice"
+            detections.append(new_det)
+
+    return detections
+
+
+def _run_patch_window_segmentation(aligned_roi: np.ndarray,
+                                   seg_model: RFDetrSegmentationModel,
+                                   enhance_mode: str,
+                                   window_size: Tuple[int, int],
+                                   overlap: float,
+                                   debug_dir: Optional[Path],
+                                   font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
+    if window_size is None:
+        return []
+
+    roi_h, roi_w = aligned_roi.shape[:2]
+    stride = calculate_stride(window_size, overlap)
+    patches = sliding_window_crop_raw(aligned_roi, window_size, stride)
+    detections: List[Dict[str, Any]] = []
+
+    for patch_idx, patch_info in enumerate(patches):
+        patch = patch_info["patch"]
+        px, py = patch_info["position"]
+        enhanced_patch = enhance_image(patch, mode=enhance_mode, output_bits=8)
+        padded_patch, pad_left, pad_top = center_pad_to_window(enhanced_patch, window_size)
+
+        raw_defects, _ = seg_model.infer(
+            ensure_color(padded_patch), rotation_meta=None, visualize=False, font_renderer=None
+        )
+
+        if debug_dir is not None:
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            det_path = debug_dir / f"wideslice_patch_{patch_idx:04d}_seg.jpg"
+            _save_debug_image(ensure_color(padded_patch), raw_defects or [], det_path, font_renderer)
+
+        for defect in raw_defects or []:
+            bbox = defect.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            new_defect = defect.copy()
+            new_defect["bbox"] = [
+                float(np.clip(bbox[0] - pad_left + px, 0, roi_w)),
+                float(np.clip(bbox[1] - pad_top + py, 0, roi_h)),
+                float(np.clip(bbox[2] - pad_left + px, 0, roi_w)),
+                float(np.clip(bbox[3] - pad_top + py, 0, roi_h)),
+            ]
+            polygon = defect.get("polygon")
+            if polygon:
+                shifted_polygon = [
+                    [float(pt[0] - pad_left), float(pt[1] - pad_top)]
+                    for pt in polygon
+                    if isinstance(pt, (list, tuple, np.ndarray)) and len(pt) >= 2
+                ]
+                new_defect["polygon"] = _offset_polygon(shifted_polygon, px, py, roi_w, roi_h)
+            new_defect["source"] = "wide_slice"
+            detections.append(new_defect)
+
+    return detections
 
 
 def _detect_resized_slice(patch: WideSlicePatch,
@@ -761,8 +931,10 @@ def _detect_resized_slice(patch: WideSlicePatch,
                           font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
     if patch.width <= 0 or patch.height <= 0:
         return []
-    resized = resize_slice_to_square(patch.image, target_size)
-    prepared = ensure_color(resized)
+    padded, scale, pad_left, pad_top = letterbox_to_window(
+        patch.image, (target_size, target_size)
+    )
+    prepared = ensure_color(padded)
     raw = detection_model.predict_patch(prepared)
     if debug_dir is not None:
         debug_dir.mkdir(parents=True, exist_ok=True)
@@ -770,18 +942,16 @@ def _detect_resized_slice(patch: WideSlicePatch,
         _save_debug_image(prepared, raw or [], det_path, font_renderer)
     if not raw:
         return []
-    scale_x = patch.width / target_size
-    scale_y = patch.height / target_size
     detections: List[Dict[str, Any]] = []
 
     for det in raw:
         bbox = det["bbox"]
         new_det = det.copy()
         new_det["bbox"] = [
-            float(bbox[0] * scale_x + patch.x_offset),
-            float(bbox[1] * scale_y),
-            float(bbox[2] * scale_x + patch.x_offset),
-            float(bbox[3] * scale_y)
+            float((bbox[0] - pad_left) / scale + patch.x_offset),
+            float((bbox[1] - pad_top) / scale),
+            float((bbox[2] - pad_left) / scale + patch.x_offset),
+            float((bbox[3] - pad_top) / scale)
         ]
         new_det["source"] = "wide_slice"
         detections.append(new_det)
@@ -798,8 +968,10 @@ def _detect_wide_pair_slice(top_patch: WideSlicePatch,
                             debug_dir: Optional[Path],
                             font_renderer: Optional[FontRenderer]) -> List[Dict[str, Any]]:
     stacked = stack_wide_slice_pair(top_patch, bottom_patch)
-    resized = resize_slice_to_square(stacked, target_size)
-    prepared = ensure_color(resized)
+    padded, scale, pad_left, pad_top = letterbox_to_window(
+        stacked, (target_size, target_size)
+    )
+    prepared = ensure_color(padded)
     raw = detection_model.predict_patch(prepared)
     if debug_dir is not None:
         debug_dir.mkdir(parents=True, exist_ok=True)
@@ -808,16 +980,13 @@ def _detect_wide_pair_slice(top_patch: WideSlicePatch,
     if not raw:
         return []
 
-    window_w = top_patch.width
-    scale_x = window_w / target_size
-    scale_y = (2 * roi_height) / target_size
     detections: List[Dict[str, Any]] = []
     for det in raw:
         bbox = det["bbox"]
-        x1 = bbox[0] * scale_x
-        y1 = bbox[1] * scale_y
-        x2 = bbox[2] * scale_x
-        y2 = bbox[3] * scale_y
+        x1 = (bbox[0] - pad_left) / scale
+        y1 = (bbox[1] - pad_top) / scale
+        x2 = (bbox[2] - pad_left) / scale
+        y2 = (bbox[3] - pad_top) / scale
         center_y = (y1 + y2) / 2.0
         if center_y < roi_height:
             x_offset = top_patch.x_offset
@@ -886,6 +1055,61 @@ def _apply_classwise_nms(detections: List[Dict[str, Any]], iou_threshold: float)
         if not suppressed:
             kept.append(det)
     return kept
+
+
+def _suppress_contained_boxes(detections: List[Dict[str, Any]],
+                              containment_thresh: float = 0.9) -> List[Dict[str, Any]]:
+    """
+    同类别包含抑制：若大框包含小框（intersection/area_small >= 阈值），保留大框。
+    """
+    if not detections:
+        return []
+
+    def _area(b):
+        return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+    def _inter_area(a, b):
+        x1 = max(a[0], b[0])
+        y1 = max(a[1], b[1])
+        x2 = min(a[2], b[2])
+        y2 = min(a[3], b[3])
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        return (x2 - x1) * (y2 - y1)
+
+    keep = [True] * len(detections)
+    # 按类别分组
+    class_groups: Dict[int, List[int]] = {}
+    for idx, det in enumerate(detections):
+        cls_id = int(det.get("class_id", -1))
+        class_groups.setdefault(cls_id, []).append(idx)
+
+    for _, indices in class_groups.items():
+        # 按面积从大到小
+        indices_sorted = sorted(
+            indices,
+            key=lambda i: _area(detections[i]["bbox"]),
+            reverse=True
+        )
+        for i, idx_big in enumerate(indices_sorted):
+            if not keep[idx_big]:
+                continue
+            bbox_big = detections[idx_big]["bbox"]
+            area_big = _area(bbox_big)
+            if area_big <= 0:
+                continue
+            for idx_small in indices_sorted[i + 1:]:
+                if not keep[idx_small]:
+                    continue
+                bbox_small = detections[idx_small]["bbox"]
+                area_small = _area(bbox_small)
+                if area_small <= 0:
+                    continue
+                inter = _inter_area(bbox_big, bbox_small)
+                if inter / area_small >= containment_thresh:
+                    keep[idx_small] = False
+
+    return [det for det, flag in zip(detections, keep) if flag]
 
 
 def _bbox_iou(box_a: Sequence[float], box_b: Sequence[float]) -> float:

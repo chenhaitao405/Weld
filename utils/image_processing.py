@@ -111,8 +111,14 @@ def enhance_image_windowing(image: np.ndarray, output_bits: int = 8) -> np.ndarr
     # 直接处理，避免重复类型转换
     img_float = image.astype(np.float32, copy=False)
 
-    # 自动计算窗宽窗位
-    window_width, window_level = auto_window_level(img_float)
+    # 自动计算窗宽窗位（仅用中间70%宽度统计，左右各15%）
+    h, w = img_float.shape[:2]
+    margin = int(w * 0.15)
+    if margin > 0 and (w - 2 * margin) > 1:
+        stats_img = img_float[:, margin:w - margin]
+    else:
+        stats_img = img_float
+    window_width, window_level = auto_window_level(stats_img)
 
     # 应用窗宽窗位变换
     enhanced = apply_window_level(img_float, window_width, window_level, output_bits)
@@ -311,6 +317,118 @@ def sliding_window_crop_batch(image: np.ndarray, window_size: Tuple[int, int],
 
     return patches, positions
 
+
+def sliding_window_crop_raw(image: np.ndarray, window_size: Tuple[int, int],
+                            stride: Tuple[int, int]) -> List[Dict]:
+    """
+    滑动窗口裁剪（不填充，返回原始尺寸patch）
+
+    Args:
+        image: 输入图像
+        window_size: 窗口大小 (height, width)
+        stride: 滑动步长 (y_stride, x_stride)
+
+    Returns:
+        patches列表，每个元素包含patch、位置、窗口大小与原始尺寸
+    """
+    h, w = image.shape[:2]
+    window_h, window_w = window_size
+    y_stride, x_stride = stride
+
+    y_stride = max(1, y_stride)
+    x_stride = max(1, x_stride)
+
+    n_y = 1 if h <= window_h else ((h - window_h) // y_stride + 1)
+    n_x = 1 if w <= window_w else ((w - window_w) // x_stride + 1)
+
+    if h > window_h and (h - window_h) % y_stride != 0:
+        n_y += 1
+    if w > window_w and (w - window_w) % x_stride != 0:
+        n_x += 1
+
+    patches: List[Dict] = []
+    for i in range(n_y):
+        for j in range(n_x):
+            if h > window_h:
+                y = min(i * y_stride, h - window_h)
+            else:
+                y = 0
+
+            if w > window_w:
+                x = min(j * x_stride, w - window_w)
+            else:
+                x = 0
+
+            crop_y_end = min(y + window_h, h)
+            crop_x_end = min(x + window_w, w)
+            crop_h = crop_y_end - y
+            crop_w = crop_x_end - x
+
+            patch = image[y:crop_y_end, x:crop_x_end]
+            patches.append({
+                "patch": patch,
+                "position": (x, y),
+                "size": window_size,
+                "raw_size": (crop_h, crop_w)
+            })
+
+    return patches
+
+
+def center_pad_to_window(image: np.ndarray, window_size: Tuple[int, int]) -> Tuple[np.ndarray, int, int]:
+    """
+    将图像居中放入指定窗口大小，四周填充0。
+
+    Returns:
+        (padded_image, pad_left, pad_top)
+    """
+    window_h, window_w = window_size
+    h, w = image.shape[:2]
+
+    if h >= window_h and w >= window_w:
+        return image, 0, 0
+
+    pad_top = max(0, (window_h - h) // 2)
+    pad_left = max(0, (window_w - w) // 2)
+    pad_bottom = max(0, window_h - h - pad_top)
+    pad_right = max(0, window_w - w - pad_left)
+
+    if len(image.shape) == 3:
+        padded = np.zeros((window_h, window_w, image.shape[2]), dtype=image.dtype)
+        padded[pad_top:pad_top + h, pad_left:pad_left + w, :] = image
+    else:
+        padded = np.zeros((window_h, window_w), dtype=image.dtype)
+        padded[pad_top:pad_top + h, pad_left:pad_left + w] = image
+
+    return padded, pad_left, pad_top
+
+
+def letterbox_to_window(image: np.ndarray, window_size: Tuple[int, int]) -> Tuple[np.ndarray, float, int, int]:
+    """
+    等比缩放并居中填充到指定窗口大小。
+
+    Returns:
+        (padded_image, scale, pad_left, pad_top)
+    """
+    window_h, window_w = window_size
+    h, w = image.shape[:2]
+    if h == 0 or w == 0:
+        return image, 1.0, 0, 0
+
+    scale = min(window_w / w, window_h / h)
+    if scale <= 0:
+        scale = 1.0
+
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+
+    if new_w == w and new_h == h:
+        resized = image
+    else:
+        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    padded, pad_left, pad_top = center_pad_to_window(resized, window_size)
+    return padded, scale, pad_left, pad_top
 
 
 def sliding_window_crop(image: np.ndarray, window_size: Tuple[int, int],

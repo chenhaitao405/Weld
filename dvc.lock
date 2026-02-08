@@ -47,8 +47,8 @@ stages:
       nfiles: 2344
     - path: params.yaml
       hash: md5
-      md5: 14d6a966d9f053f78060f41e7182016d
-      size: 1772
+      md5: bb852ce7101319c674a0b6b99dcf13a1
+      size: 1787
     - path: run_data_pipeline.py
       hash: md5
       md5: 7b62649090b6775688658b2adaa65ab8
@@ -58,7 +58,7 @@ stages:
         preprocess:
           profile: pair_1120_1208
           seed: 42
-          output_base_dir: data/pipeline_pair_1120_mannualval
+          output_base_dir: data/pipeline_pair_1120_mannualval_patch880_enhance
           steps: 123456
           dataset_pairs:
           - image_root: datasets/images/1120
@@ -74,12 +74,12 @@ stages:
             padding: 0.1
             mode: seg
           patchandenhance:
-            overlap: 0.7
+            overlap: 0.5
             enhance_mode: windowing
-            slice_mode: 3
+            slice_mode: 2
             window_size:
-            - 1120
-            - 1120
+            - 880
+            - 880
             label_mode: seg
           seg2det:
             mode: det
@@ -98,8 +98,8 @@ stages:
             merge_ratio:
             - 1.0
     outs:
-    - path: data/pipeline_pair_1120_mannualval
+    - path: data/pipeline_pair_1120_mannualval_patch880_enhance
       hash: md5
-      md5: 426a952ad0263abdb2988349efd8aa37.dir
-      size: 6837910430
-      nfiles: 11898
+      md5: c53aa1669cd9d8989e03e3894443b2a2.dir
+      size: 7402604446
+      nfiles: 24643
