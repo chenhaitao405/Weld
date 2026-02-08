@@ -97,6 +97,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--iou-threshold", type=float, default=0.3,
                         help="判定命中的最小IoU阈值")
+    parser.add_argument("--containment-threshold", type=float, default=0.9,
+                        help="判定命中的最小包含率阈值(intersection/gt_area)，默认0.9")
     parser.add_argument("--copy-images", dest="copy_images", action="store_true",
                         help="将原图拷贝到输出目录的media子目录，便于后续打包")
     parser.add_argument("--no-copy-images", dest="copy_images", action="store_false",
@@ -105,7 +107,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--font-path", help="用于中文显示的字体路径，可选")
     parser.add_argument("--font-size", type=int, default=24, help="绘制文字的字号")
     parser.add_argument("--match-mode", choices=["best", "multi"], default="multi",
-                        help="best=每个GT只匹配IoU最大的预测；multi=所有超过阈值的预测都视为命中")
+                        help="best=每个GT只匹配IoU最大的预测；multi=所有超过IoU或包含率阈值的预测都视为命中")
     parser.add_argument("--verified-threshold", type=float, default=0.75,
                         help="(1-IoU)*confidence 超过该阈值即视为漏标注，默认0.75")
     parser.add_argument("--verified-image-dir", default=None,
@@ -149,6 +151,25 @@ def compute_iou(box_a: Sequence[float], box_b: Sequence[float]) -> float:
     if union <= 0:
         return 0.0
     return inter_area / union
+
+
+def compute_containment(pred_box: Sequence[float], gt_box: Sequence[float]) -> float:
+    """intersection / gt_area，用于判断预测框是否覆盖GT。"""
+    px1, py1, px2, py2 = pred_box
+    gx1, gy1, gx2, gy2 = gt_box
+    inter_x1 = max(px1, gx1)
+    inter_y1 = max(py1, gy1)
+    inter_x2 = min(px2, gx2)
+    inter_y2 = min(py2, gy2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+    if inter_area <= 0:
+        return 0.0
+    gt_area = max(0.0, gx2 - gx1) * max(0.0, gy2 - gy1)
+    if gt_area <= 0:
+        return 0.0
+    return inter_area / gt_area
 
 
 def normalize_class_name(name: Optional[str]) -> Optional[str]:
@@ -223,7 +244,8 @@ def evaluate_image(predictions: List[PredictionRecord],
                    annotations: List[AnnotationRecord],
                    iou_threshold: float,
                    match_mode: str,
-                   verified_threshold: float) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+                   verified_threshold: float,
+                   containment_threshold: float) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     pred_data = [pred.to_dict() for pred in predictions]
     gt_data = [ann.to_dict() for ann in annotations]
     allow_multi = (match_mode == "multi")
@@ -250,17 +272,19 @@ def evaluate_image(predictions: List[PredictionRecord],
         for pred_idx, pred in enumerate(pred_data):
             for gt_idx, gt in enumerate(gt_data):
                 iou = compute_iou(pred["bbox"], gt["bbox"])
+                containment = compute_containment(pred["bbox"], gt["bbox"])
                 if iou > pred["best_iou"]:
                     pred["best_iou"] = iou
                     pred["best_gt_index"] = gt_idx
                 if iou > gt["best_iou"]:
                     gt["best_iou"] = iou
                     gt["best_prediction"] = pred_idx
-                if iou >= iou_threshold:
+                if iou >= iou_threshold or containment >= containment_threshold:
                     match_status = STATUS_SUCCESS_CLASS if classes_match(pred, gt) else STATUS_SUCCESS_DETECT
                     pred_match = {
                         "gt_index": gt_idx,
                         "iou": iou,
+                        "containment": containment,
                         "status": match_status
                     }
                     pred["matches"].append(pred_match)
@@ -269,6 +293,7 @@ def evaluate_image(predictions: List[PredictionRecord],
                     gt["matches"].append({
                         "pred_index": pred_idx,
                         "iou": iou,
+                        "containment": containment,
                         "status": match_status
                     })
         for gt in gt_data:
@@ -288,17 +313,24 @@ def evaluate_image(predictions: List[PredictionRecord],
         for gt_idx, gt in enumerate(gt_data):
             best_pred_idx = None
             best_iou = 0.0
+            best_containment = 0.0
+            best_score = 0.0
             for pred_idx, pred in enumerate(pred_data):
                 iou = compute_iou(pred["bbox"], gt["bbox"])
+                containment = compute_containment(pred["bbox"], gt["bbox"])
                 if iou > pred["best_iou"]:
                     pred["best_iou"] = iou
                     pred["best_gt_index"] = gt_idx
                 if iou > gt["best_iou"]:
                     gt["best_iou"] = iou
                     gt["best_prediction"] = pred_idx
-                if iou > best_iou:
-                    best_iou = iou
-                    best_pred_idx = pred_idx
+                if iou >= iou_threshold or containment >= containment_threshold:
+                    score = max(iou, containment)
+                    if score > best_score:
+                        best_score = score
+                        best_iou = iou
+                        best_containment = containment
+                        best_pred_idx = pred_idx
 
             if best_pred_idx is None:
                 gt["status"] = STATUS_MISSED
@@ -307,7 +339,7 @@ def evaluate_image(predictions: List[PredictionRecord],
                 status_counter[STATUS_MISSED] += 1
                 continue
 
-            if best_iou < iou_threshold:
+            if best_iou < iou_threshold and best_containment < containment_threshold:
                 gt["status"] = STATUS_MISSED
                 gt["matched_prediction"] = None
                 gt["iou"] = best_iou
@@ -322,6 +354,7 @@ def evaluate_image(predictions: List[PredictionRecord],
             pred_match = {
                 "gt_index": gt_idx,
                 "iou": best_iou,
+                "containment": best_containment,
                 "status": match_status
             }
             pred["matches"].append(pred_match)
@@ -364,6 +397,7 @@ def evaluate_image(predictions: List[PredictionRecord],
         "counts": {
             "predictions": total_preds,
             "ground_truth": total_gt,
+            "gt_detected": matched_gt,
             STATUS_SUCCESS_CLASS: status_counter[STATUS_SUCCESS_CLASS],
             STATUS_SUCCESS_DETECT: status_counter[STATUS_SUCCESS_DETECT],
             STATUS_FALSE: status_counter[STATUS_FALSE],
@@ -615,6 +649,7 @@ def build_verified_summary(entries: List[Dict[str, Any]],
         counts = entry.get("status_counts") or {}
         counts_total["predictions"] += counts.get("predictions", 0)
         counts_total["ground_truth"] += counts.get("ground_truth", 0)
+        counts_total["gt_detected"] += counts.get("gt_detected", 0)
         counts_total[STATUS_SUCCESS_CLASS] += counts.get(STATUS_SUCCESS_CLASS, 0)
         counts_total[STATUS_SUCCESS_DETECT] += counts.get(STATUS_SUCCESS_DETECT, 0)
         counts_total[STATUS_FALSE] += counts.get(STATUS_FALSE, 0)
@@ -626,9 +661,10 @@ def build_verified_summary(entries: List[Dict[str, Any]],
     success_class = counts_total[STATUS_SUCCESS_CLASS]
     success_detect = counts_total[STATUS_SUCCESS_DETECT]
     detected_total = success_class + success_detect
+    detected_gt = counts_total.get("gt_detected", 0)
 
     precision = (detected_total / total_pred) if total_pred > 0 else None
-    recall = (detected_total / total_gt) if total_gt > 0 else None
+    recall = (detected_gt / total_gt) if total_gt > 0 else None
     classification_accuracy = (success_class / detected_total) if detected_total > 0 else None
 
     config_copy = dict(base_config or {})
@@ -641,6 +677,7 @@ def build_verified_summary(entries: List[Dict[str, Any]],
         "counts": {
             "predictions": total_pred,
             "ground_truth": total_gt,
+            "gt_detected": detected_gt,
             STATUS_SUCCESS_CLASS: success_class,
             STATUS_SUCCESS_DETECT: success_detect,
             STATUS_FALSE: counts_total[STATUS_FALSE],
@@ -804,7 +841,8 @@ def main():
             annotations,
             args.iou_threshold,
             args.match_mode,
-            args.verified_threshold
+            args.verified_threshold,
+            args.containment_threshold
         )
 
         overlay = draw_overlay(image, eval_data, font_renderer)
@@ -866,6 +904,7 @@ def main():
     total_pred = global_counts.get("predictions", 0)
     total_gt = global_counts.get("ground_truth", 0)
     detected_total = global_success_class + global_success_detect
+    detected_gt = global_counts.get("gt_detected", 0)
     summary = {
         "config": {
             "inference_json": str(inference_path),
@@ -874,17 +913,19 @@ def main():
             "label_root": str(args.label_root) if args.label_root else None,
             "coco_json": str(args.coco_json) if args.coco_json else None,
             "iou_threshold": args.iou_threshold,
+            "containment_threshold": args.containment_threshold,
             "copy_images": args.copy_images,
             "verified_threshold": args.verified_threshold,
             "verified_image_dir": str(verified_image_dir),
         },
         "overall": {
             "defect_precision": (detected_total / total_pred) if total_pred > 0 else None,
-            "defect_recall": (detected_total / total_gt) if total_gt > 0 else None,
+            "defect_recall": (detected_gt / total_gt) if total_gt > 0 else None,
             "classification_accuracy": (global_success_class / detected_total) if detected_total > 0 else None,
             "counts": {
                 "predictions": total_pred,
                 "ground_truth": total_gt,
+                "gt_detected": detected_gt,
                 STATUS_SUCCESS_CLASS: global_success_class,
                 STATUS_SUCCESS_DETECT: global_success_detect,
                 STATUS_FALSE: global_counts.get(STATUS_FALSE, 0),

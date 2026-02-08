@@ -9,7 +9,7 @@ import numpy as np
 from ultralytics import YOLO
 
 from convert.pj.yolo_roi_extractor import WeldROIDetector
-from utils import enhance_image, calculate_stride, sliding_window_crop
+from utils import enhance_image, calculate_stride, sliding_window_crop_raw, center_pad_to_window
 from utils.pipeline_utils import (
     FontRenderer,
     align_roi_orientation,
@@ -431,7 +431,7 @@ def _run_patch_detection(
         return []
 
     stride = calculate_stride(window_size, overlap)
-    patches = sliding_window_crop(aligned_roi, window_size, stride)
+    patches = sliding_window_crop_raw(aligned_roi, window_size, stride)
     roi_h, roi_w = aligned_roi.shape[:2]
     detections: List[Dict[str, Any]] = []
 
@@ -439,18 +439,19 @@ def _run_patch_detection(
         patch = patch_info["patch"]
         px, py = patch_info["position"]
         enhanced_patch = enhance_image(patch, mode=enhance_mode, output_bits=8)
-        patch_dets = secondary_model.predict_patch(ensure_color(enhanced_patch))
+        padded_patch, pad_left, pad_top = center_pad_to_window(enhanced_patch, window_size)
+        patch_dets = secondary_model.predict_patch(ensure_color(padded_patch))
         if debug_dir is not None:
             debug_dir.mkdir(parents=True, exist_ok=True)
             out_path = debug_dir / f"patch_{patch_idx:03d}.jpg"
-            _save_debug_image(ensure_color(enhanced_patch), patch_dets, out_path, font_renderer)
+            _save_debug_image(ensure_color(padded_patch), patch_dets, out_path, font_renderer)
         for det in patch_dets:
             bbox = det["bbox"]
             offset_bbox = [
-                float(np.clip(bbox[0] + px, 0, roi_w)),
-                float(np.clip(bbox[1] + py, 0, roi_h)),
-                float(np.clip(bbox[2] + px, 0, roi_w)),
-                float(np.clip(bbox[3] + py, 0, roi_h)),
+                float(np.clip(bbox[0] - pad_left + px, 0, roi_w)),
+                float(np.clip(bbox[1] - pad_top + py, 0, roi_h)),
+                float(np.clip(bbox[2] - pad_left + px, 0, roi_w)),
+                float(np.clip(bbox[3] - pad_top + py, 0, roi_h)),
             ]
             new_det = det.copy()
             new_det["bbox"] = offset_bbox
@@ -473,7 +474,7 @@ def _run_patch_segmentation(
         return []
 
     stride = calculate_stride(window_size, overlap)
-    patches = sliding_window_crop(aligned_roi, window_size, stride)
+    patches = sliding_window_crop_raw(aligned_roi, window_size, stride)
     roi_h, roi_w = aligned_roi.shape[:2]
     detections: List[Dict[str, Any]] = []
 
@@ -481,29 +482,35 @@ def _run_patch_segmentation(
         patch = patch_info["patch"]
         px, py = patch_info["position"]
         enhanced_patch = enhance_image(patch, mode=enhance_mode, output_bits=8)
+        padded_patch, pad_left, pad_top = center_pad_to_window(enhanced_patch, window_size)
         defects, _ = secondary_model.infer(
-            ensure_color(enhanced_patch), rotation_meta=None, visualize=False, font_renderer=None
+            ensure_color(padded_patch), rotation_meta=None, visualize=False, font_renderer=None
         )
         if debug_dir is not None:
             debug_dir.mkdir(parents=True, exist_ok=True)
             out_path = debug_dir / f"patch_{patch_idx:03d}.jpg"
-            _save_debug_image(ensure_color(enhanced_patch), defects, out_path, font_renderer)
+            _save_debug_image(ensure_color(padded_patch), defects, out_path, font_renderer)
 
         for defect in defects:
             bbox = defect.get("bbox")
             if bbox is None or len(bbox) != 4:
                 continue
             offset_bbox = [
-                float(np.clip(bbox[0] + px, 0, roi_w)),
-                float(np.clip(bbox[1] + py, 0, roi_h)),
-                float(np.clip(bbox[2] + px, 0, roi_w)),
-                float(np.clip(bbox[3] + py, 0, roi_h)),
+                float(np.clip(bbox[0] - pad_left + px, 0, roi_w)),
+                float(np.clip(bbox[1] - pad_top + py, 0, roi_h)),
+                float(np.clip(bbox[2] - pad_left + px, 0, roi_w)),
+                float(np.clip(bbox[3] - pad_top + py, 0, roi_h)),
             ]
             new_defect = defect.copy()
             new_defect["bbox"] = offset_bbox
             polygon = defect.get("polygon")
             if polygon:
-                new_defect["polygon"] = _offset_polygon(polygon, px, py, roi_w, roi_h)
+                shifted_polygon = [
+                    [float(pt[0] - pad_left), float(pt[1] - pad_top)]
+                    for pt in polygon
+                    if isinstance(pt, (list, tuple, np.ndarray)) and len(pt) >= 2
+                ]
+                new_defect["polygon"] = _offset_polygon(shifted_polygon, px, py, roi_w, roi_h)
             new_defect["source"] = "patch"
             detections.append(new_defect)
 
