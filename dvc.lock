@@ -47,8 +47,8 @@ stages:
       nfiles: 2344
     - path: params.yaml
       hash: md5
-      md5: bb852ce7101319c674a0b6b99dcf13a1
-      size: 1787
+      md5: 5c503da2b88db18cdb67cbe4b7ea4ef3
+      size: 1996
     - path: run_data_pipeline.py
       hash: md5
       md5: 7b62649090b6775688658b2adaa65ab8
@@ -58,15 +58,14 @@ stages:
         preprocess:
           profile: pair_1120_1208
           seed: 42
-          output_base_dir: data/pipeline_pair_1120_mannualval_patch880_enhance
+          output_base_dir: data/0208pipeline/1208enhance
           steps: 123456
           dataset_pairs:
-          - image_root: datasets/images/1120
-            label_root: datasets/labels/1120
+          - image_root: datasets/images/1208
+            label_root: datasets/labels/1208
           labelme2yolo:
             seg: true
             unify_to_crack: false
-            val_manifest: datasets/labels/1120/val_manifest.json
           yolo_roi_extractor:
             model_path: ./model/weldROI4.pt
             roi_conf: 0.25
@@ -98,8 +97,8 @@ stages:
             merge_ratio:
             - 1.0
     outs:
-    - path: data/pipeline_pair_1120_mannualval_patch880_enhance
+    - path: data/0208pipeline/1208enhance
       hash: md5
-      md5: c53aa1669cd9d8989e03e3894443b2a2.dir
-      size: 7402604446
-      nfiles: 24643
+      md5: 96ab950e40a216d932bb8b9ac72da00d.dir
+      size: 1718745382
+      nfiles: 8488
