@@ -1,17 +1,18 @@
 preprocess:
+#TODO: window的计算参数调整（向内缩进的范围）
   profile: pair_1120_1208
   seed: 42
-  output_base_dir: data/SWRD_enhance0208
-  steps: 3456
+  output_base_dir: data/0208pipeline/1208enhance
+  steps: 123456
   dataset_pairs:
 #  - image_root: datasets/images/1120
 #    label_root: datasets/labels/1120
-#  - image_root: datasets/images/1208
-#    label_root: datasets/labels/1208
+  - image_root: datasets/images/1208
+    label_root: datasets/labels/1208
 #  - image_root: datasets/images/nocrack
 #    label_root: datasets/labels/nocrack
-  - image_root: /datasets/PAR/Xray/opensource/SWRDdvcpipeline/images/swrd8bit_crop
-    label_root: /datasets/PAR/Xray/opensource/SWRDdvcpipeline/labels/swrd8bit_crop
+#  - image_root: /datasets/PAR/Xray/opensource/SWRDdvcpipeline/images/swrd8bit_crop
+#    label_root: /datasets/PAR/Xray/opensource/SWRDdvcpipeline/labels/swrd8bit_crop
   labelme2yolo:
     seg: true
     unify_to_crack: false

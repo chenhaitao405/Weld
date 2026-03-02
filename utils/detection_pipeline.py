@@ -1060,7 +1060,7 @@ def _apply_classwise_nms(detections: List[Dict[str, Any]], iou_threshold: float)
 def _suppress_contained_boxes(detections: List[Dict[str, Any]],
                               containment_thresh: float = 0.9) -> List[Dict[str, Any]]:
     """
-    同类别包含抑制：若大框包含小框（intersection/area_small >= 阈值），保留大框。
+    包含抑制（不区分类别）：若大框包含小框（intersection/area_small >= 阈值），保留大框。
     """
     if not detections:
         return []
@@ -1078,36 +1078,37 @@ def _suppress_contained_boxes(detections: List[Dict[str, Any]],
         return (x2 - x1) * (y2 - y1)
 
     keep = [True] * len(detections)
-    # 按类别分组
-    class_groups: Dict[int, List[int]] = {}
-    for idx, det in enumerate(detections):
-        cls_id = int(det.get("class_id", -1))
-        class_groups.setdefault(cls_id, []).append(idx)
-
-    for _, indices in class_groups.items():
-        # 按面积从大到小
-        indices_sorted = sorted(
-            indices,
-            key=lambda i: _area(detections[i]["bbox"]),
-            reverse=True
-        )
-        for i, idx_big in enumerate(indices_sorted):
-            if not keep[idx_big]:
+    # 按面积从大到小（不区分类别）
+    indices_sorted = sorted(
+        range(len(detections)),
+        key=lambda i: _area(detections[i]["bbox"]),
+        reverse=True
+    )
+    for i, idx_big in enumerate(indices_sorted):
+        if not keep[idx_big]:
+            continue
+        bbox_big = detections[idx_big]["bbox"]
+        area_big = _area(bbox_big)
+        if area_big <= 0:
+            continue
+        for idx_small in indices_sorted[i + 1:]:
+            if not keep[idx_small]:
                 continue
-            bbox_big = detections[idx_big]["bbox"]
-            area_big = _area(bbox_big)
-            if area_big <= 0:
+            bbox_small = detections[idx_small]["bbox"]
+            area_small = _area(bbox_small)
+            if area_small <= 0:
                 continue
-            for idx_small in indices_sorted[i + 1:]:
-                if not keep[idx_small]:
-                    continue
-                bbox_small = detections[idx_small]["bbox"]
-                area_small = _area(bbox_small)
-                if area_small <= 0:
-                    continue
-                inter = _inter_area(bbox_big, bbox_small)
-                if inter / area_small >= containment_thresh:
-                    keep[idx_small] = False
+            inter = _inter_area(bbox_big, bbox_small)
+            if inter / area_small >= containment_thresh:
+                det_big = detections[idx_big]
+                det_small = detections[idx_small]
+                conf_big = float(det_big.get("confidence", 0.0))
+                conf_small = float(det_small.get("confidence", 0.0))
+                if conf_small > conf_big:
+                    det_big["class_id"] = det_small.get("class_id", det_big.get("class_id"))
+                    det_big["class_name"] = det_small.get("class_name", det_big.get("class_name"))
+                    det_big["confidence"] = conf_small
+                keep[idx_small] = False
 
     return [det for det, flag in zip(detections, keep) if flag]
 
