@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Weld Inference: det wide-slice",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/run_inference_pipeline.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "args": [
+        "--image-dir",
+        "/home/cht/datasets/weld_temp",
+        "--mode",
+        "det",
+        "--wide-slice",
+        "--roi-weights",
+        "${workspaceFolder}/model/weldROI2.pt",
+        "--primary-conf",
+        "0.25",
+        "--primary-weights",
+        "${workspaceFolder}/model/0208primary.pth"
+      ]
+    }
+  ]
+}

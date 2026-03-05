@@ -17,3 +17,4 @@
 /train/outputs
 *.zip
 /data
+/inference_outputs

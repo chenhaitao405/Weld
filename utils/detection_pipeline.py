@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
@@ -84,6 +85,27 @@ def _load_rfdet_model_kwargs(model_path: Path) -> Dict[str, Any]:
     return extracted
 
 
+def _drop_unknown_rfdet_kwargs(model_kwargs: Dict[str, Any], exc: Exception) -> Optional[Dict[str, Any]]:
+    """Handle RF-DETR version drift by removing kwargs rejected by newer configs."""
+    message = str(exc)
+    match = re.search(r"Unknown parameter\(s\):\s*(.+?)\.\s*Available parameter\(s\):", message)
+    if not match:
+        return None
+
+    unknown_fields = []
+    for raw in match.group(1).split(","):
+        key = raw.strip().strip("'\"")
+        if key:
+            unknown_fields.append(key)
+    if not unknown_fields:
+        return None
+
+    filtered = {k: v for k, v in model_kwargs.items() if k not in unknown_fields}
+    if len(filtered) == len(model_kwargs):
+        return None
+    return filtered
+
+
 def _ensure_single_prediction(detections: Any):
     if detections is None:
         return None
@@ -121,9 +143,14 @@ class RFDetrDetectionModel:
             model_kwargs.update(checkpoint_kwargs)
         if device:
             model_kwargs["device"] = device
-        if self.model_variant == "medium":
-            return RFDETRMedium(**model_kwargs)
-        return RFDETR2XLarge(**model_kwargs)
+        model_cls = RFDETRMedium if self.model_variant == "medium" else RFDETR2XLarge
+        try:
+            return model_cls(**model_kwargs)
+        except Exception as exc:
+            compat_kwargs = _drop_unknown_rfdet_kwargs(model_kwargs, exc)
+            if compat_kwargs is None:
+                raise
+            return model_cls(**compat_kwargs)
 
     def _build_class_map(self) -> Dict[int, str]:
         raw_names = getattr(self.model, "class_names", None)
