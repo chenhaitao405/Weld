@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -49,6 +50,32 @@ DEFAULT_METRICS_PATH = "metrics/rfdetr.json"
 DEFAULT_KEEP_BEST_ONLY = False
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+PARAM_REF_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+
+def _lookup_nested_value(data: Dict[str, Any], dotted_key: str) -> Any:
+    current: Any = data
+    for part in dotted_key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _expand_param_refs(value: Any, params_data: Dict[str, Any], parser: argparse.ArgumentParser) -> Any:
+    if not isinstance(value, str):
+        return value
+
+    def _replace(match: re.Match[str]) -> str:
+        ref_key = match.group(1)
+        ref_value = _lookup_nested_value(params_data, ref_key)
+        if ref_value is None:
+            parser.error(f"Parameter reference ${{{ref_key}}} could not be resolved in params file")
+        if isinstance(ref_value, (dict, list)):
+            parser.error(f"Parameter reference ${{{ref_key}}} must resolve to a scalar value")
+        return str(ref_value)
+
+    return PARAM_REF_PATTERN.sub(_replace, value)
 
 
 def _resolve_path(path_value: Optional[str]) -> Optional[Path]:
@@ -84,8 +111,14 @@ def _load_params_file(params_path: Path, parser: argparse.ArgumentParser) -> Dic
             return {}
         if not isinstance(rfdetr_section, dict):
             parser.error("rfdetr section in params file must be a dict")
-        return rfdetr_section
-    return data
+        return {
+            key: _expand_param_refs(value, data, parser)
+            for key, value in rfdetr_section.items()
+        }
+    return {
+        key: _expand_param_refs(value, data, parser)
+        for key, value in data.items()
+    }
 
 
 def _load_training_args() -> Dict[str, Any]:
@@ -349,7 +382,7 @@ with _log_terminal_output(log_file_path):
             # positional_encoding_size= 1080//12,
             class_names=training_args["class_names"],
             num_classes=training_args["num_classes"],
-            resume=DEFAULT_RESUME,
+            resume=training_args["resume"],
             # eval_max_dets=100,
             run_test=False,
 

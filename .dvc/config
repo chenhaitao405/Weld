@@ -1,4 +1,4 @@
 [core]
     remote = local
 ['remote "local"']
-    url = /datasets/PAR/Xray/dvctemp
+    url = /home/cht/datasets/dvctemp

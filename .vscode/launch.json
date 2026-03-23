@@ -15,7 +15,7 @@
         "det",
         "--wide-slice",
         "--roi-weights",
-        "${workspaceFolder}/model/weldROI2.pt",
+        "${workspaceFolder}/model/weldROI4.pt",
         "--primary-conf",
         "0.25",
         "--primary-weights",
