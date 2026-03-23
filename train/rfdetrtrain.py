@@ -1,11 +1,13 @@
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 import mlflow
+import torch
 import yaml
 
 from rfdetr import RFDETRSeg2XLarge, RFDETRLarge, RFDETRSegPreview, RFDETRMedium,RFDETRSegXLarge,RFDETR2XLarge
@@ -49,6 +51,32 @@ DEFAULT_METRICS_PATH = "metrics/rfdetr.json"
 DEFAULT_KEEP_BEST_ONLY = False
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+PARAM_REF_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+
+def _lookup_nested_value(data: Dict[str, Any], dotted_key: str) -> Any:
+    current: Any = data
+    for part in dotted_key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _expand_param_refs(value: Any, params_data: Dict[str, Any], parser: argparse.ArgumentParser) -> Any:
+    if not isinstance(value, str):
+        return value
+
+    def _replace(match: re.Match[str]) -> str:
+        ref_key = match.group(1)
+        ref_value = _lookup_nested_value(params_data, ref_key)
+        if ref_value is None:
+            parser.error(f"Parameter reference ${{{ref_key}}} could not be resolved in params file")
+        if isinstance(ref_value, (dict, list)):
+            parser.error(f"Parameter reference ${{{ref_key}}} must resolve to a scalar value")
+        return str(ref_value)
+
+    return PARAM_REF_PATTERN.sub(_replace, value)
 
 
 def _resolve_path(path_value: Optional[str]) -> Optional[Path]:
@@ -58,6 +86,58 @@ def _resolve_path(path_value: Optional[str]) -> Optional[Path]:
     if not path.is_absolute():
         path = (BASE_DIR / path).resolve()
     return path
+
+
+def _prepare_compatible_resume(
+    resume_path: Optional[Path],
+    class_names: Any,
+    output_dir: Path,
+) -> Optional[Path]:
+    if resume_path is None or not resume_path.exists():
+        return resume_path
+    if not isinstance(class_names, list):
+        return resume_path
+
+    checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+    checkpoint_model = checkpoint.get("model")
+    if not isinstance(checkpoint_model, dict):
+        return resume_path
+
+    expected_num_classes = len(class_names) + 1
+    model.model.reinitialize_detection_head(expected_num_classes)
+    reference_state = model.model.model.state_dict()
+
+    has_shape_mismatch = any(
+        key in checkpoint_model and checkpoint_model[key].shape != ref_value.shape
+        for key, ref_value in reference_state.items()
+        if hasattr(ref_value, "shape")
+    )
+    if not has_shape_mismatch:
+        return resume_path
+
+    compatible_state = {}
+    replaced_keys = []
+    for key, ref_value in reference_state.items():
+        checkpoint_value = checkpoint_model.get(key)
+        if checkpoint_value is None or getattr(checkpoint_value, "shape", None) != ref_value.shape:
+            compatible_state[key] = ref_value.detach().clone()
+            replaced_keys.append(key)
+        else:
+            compatible_state[key] = checkpoint_value.detach().clone()
+
+    compatible_checkpoint = {
+        "model": compatible_state,
+        "args": checkpoint.get("args"),
+        "compat_resume_source": str(resume_path),
+        "compat_resume_replaced_keys": replaced_keys,
+    }
+    compatible_path = output_dir / f"{resume_path.stem}.compat{resume_path.suffix}"
+    torch.save(compatible_checkpoint, compatible_path)
+    print(
+        "Resume checkpoint has incompatible parameter shapes for the current RF-DETR head. "
+        f"Created compatible weights at {compatible_path} and reset optimizer resume state."
+    )
+    return compatible_path
 
 
 def _load_params_file(params_path: Path, parser: argparse.ArgumentParser) -> Dict[str, Any]:
@@ -84,8 +164,14 @@ def _load_params_file(params_path: Path, parser: argparse.ArgumentParser) -> Dic
             return {}
         if not isinstance(rfdetr_section, dict):
             parser.error("rfdetr section in params file must be a dict")
-        return rfdetr_section
-    return data
+        return {
+            key: _expand_param_refs(value, data, parser)
+            for key, value in rfdetr_section.items()
+        }
+    return {
+        key: _expand_param_refs(value, data, parser)
+        for key, value in data.items()
+    }
 
 
 def _load_training_args() -> Dict[str, Any]:
@@ -169,6 +255,11 @@ output_root = _resolve_path(training_args["output_dir"]) or (BASE_DIR / "outputs
 run_name = training_args["run"]
 run_output_dir = output_root / run_name
 run_output_dir.mkdir(parents=True, exist_ok=True)
+resume_path = _prepare_compatible_resume(
+    resume_path,
+    training_args.get("class_names"),
+    run_output_dir,
+)
 training_args["output_dir"] = str(output_root)
 training_args["run_output_dir"] = str(run_output_dir)
 training_args["dataset_dir"] = str(dataset_dir_path)
@@ -349,7 +440,7 @@ with _log_terminal_output(log_file_path):
             # positional_encoding_size= 1080//12,
             class_names=training_args["class_names"],
             num_classes=training_args["num_classes"],
-            resume=DEFAULT_RESUME,
+            resume=training_args["resume"],
             # eval_max_dets=100,
             run_test=False,
 

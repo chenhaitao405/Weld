@@ -10,6 +10,7 @@ import json
 import re
 import shlex
 import subprocess
+import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -33,6 +34,14 @@ def parse_args() -> argparse.Namespace:
                         help="验证与可视化输出子目录（相对base-path），默认 valid")
     parser.add_argument("--inference-results", default="inference_results.json",
                         help="推理结果JSON文件名，默认 inference_results.json")
+    parser.add_argument("--seg2det-script", default="convert/pj/seg2det.py",
+                        help="可选，seg→det 转换脚本路径，默认 convert/pj/seg2det.py")
+    parser.add_argument("--seg2det-opts", default="",
+                        help="可选，若提供则会在 YOLO→COCO 前先执行 seg→det 转换")
+    parser.add_argument("--convert-yolo-script", default="convert/yolo2coco.py",
+                        help="可选，YOLO→COCO 转换脚本路径，默认 convert/yolo2coco.py")
+    parser.add_argument("--convert-yolo-opts", default="",
+                        help="可选，若提供则会在推理前先执行 YOLO→COCO 转换")
     parser.add_argument("--run-inference-opts", default="", help="追加到 run_inference_pipeline.py 的参数字符串")
     parser.add_argument("--validate-opts", default="", help="追加到 validate_inference_results.py 的参数字符串")
     parser.add_argument("--visualize-opts", default="", help="追加到 visualize_validation_results.py 的参数字符串")
@@ -195,11 +204,23 @@ def main() -> None:
 
     inference_results_path = infer_dir / args.inference_results
 
+    python_executable = sys.executable
+
     run_infer_opts = split_opts(args.run_inference_opts)
+    seg2det_opts = split_opts(args.seg2det_opts)
+    convert_yolo_opts = split_opts(args.convert_yolo_opts)
     validate_opts = split_opts(args.validate_opts)
     visualize_opts = split_opts(args.visualize_opts)
 
-    run_infer_cmd = ["python", "run_inference_pipeline.py"]
+    seg2det_cmd: Optional[List[str]] = None
+    if seg2det_opts:
+        seg2det_cmd = [python_executable, args.seg2det_script, *seg2det_opts]
+
+    convert_yolo_cmd: Optional[List[str]] = None
+    if convert_yolo_opts:
+        convert_yolo_cmd = [python_executable, args.convert_yolo_script, *convert_yolo_opts]
+
+    run_infer_cmd = [python_executable, "run_inference_pipeline.py"]
     if not ensure_flag(run_infer_opts, "--output-dir"):
         run_infer_cmd += ["--output-dir", str(infer_dir)]
     if not ensure_flag(run_infer_opts, "--results-json"):
@@ -221,7 +242,7 @@ def main() -> None:
     if image_root is None:
         raise ValueError("必须在 --run-inference-opts 中指定 --image-dir，用于 validate 阶段的 --image-root")
 
-    validate_cmd = ["python", "validate_inference_results.py"]
+    validate_cmd = [python_executable, "validate_inference_results.py"]
     if not ensure_flag(validate_opts, "--inference-json"):
         validate_cmd += ["--inference-json", str(inference_results_path)]
     if not ensure_flag(validate_opts, "--output-dir"):
@@ -236,7 +257,7 @@ def main() -> None:
     valid_dir.mkdir(parents=True, exist_ok=True)
     report_path = valid_dir / "report.html"
 
-    visualize_cmd = ["python", "visualize_validation_results.py"]
+    visualize_cmd = [python_executable, "visualize_validation_results.py"]
     if not ensure_flag(visualize_opts, "--validation-dir"):
         visualize_cmd += ["--validation-dir", str(valid_dir)]
     if not ensure_flag(visualize_opts, "--output-html"):
@@ -287,6 +308,12 @@ def main() -> None:
         }
         if args.run_inference_opts:
             pipeline_params["run_inference_opts"] = args.run_inference_opts
+        if args.seg2det_opts:
+            pipeline_params["seg2det_script"] = args.seg2det_script
+            pipeline_params["seg2det_opts"] = args.seg2det_opts
+        if args.convert_yolo_opts:
+            pipeline_params["convert_yolo_script"] = args.convert_yolo_script
+            pipeline_params["convert_yolo_opts"] = args.convert_yolo_opts
         if args.validate_opts:
             pipeline_params["validate_opts"] = args.validate_opts
         if args.visualize_opts:
@@ -299,6 +326,24 @@ def main() -> None:
             log_artifact_if_exists(config_path, "pipeline")
 
         try:
+            if seg2det_cmd:
+                seg2det_success = execute_stage("seg2det", seg2det_cmd, args.dry_run, mlflow_enabled)
+                if seg2det_success and mlflow_enabled and not args.dry_run:
+                    seg2det_output_dir = get_flag_value(seg2det_cmd, "--output_dir")
+                    if seg2det_output_dir:
+                        seg2det_dir = Path(seg2det_output_dir).expanduser().resolve()
+                        log_artifact_if_exists(seg2det_dir / "dataset.yaml", "seg2det")
+
+            if convert_yolo_cmd:
+                convert_success = execute_stage("conversion", convert_yolo_cmd, args.dry_run, mlflow_enabled)
+                if convert_success and mlflow_enabled and not args.dry_run:
+                    convert_output_dir = get_flag_value(convert_yolo_cmd, "--output_dir")
+                    if convert_output_dir:
+                        convert_dir = Path(convert_output_dir).expanduser().resolve()
+                        log_artifact_if_exists(convert_dir / "train" / "_annotations.coco.json", "conversion")
+                        log_artifact_if_exists(convert_dir / "valid" / "_annotations.coco.json", "conversion")
+                        log_artifact_if_exists(convert_dir / "test" / "_annotations.coco.json", "conversion")
+
             if '1' in selected_steps:
                 infer_success = execute_stage("inference", run_infer_cmd, args.dry_run, mlflow_enabled)
                 if infer_success and mlflow_enabled and not args.dry_run:
