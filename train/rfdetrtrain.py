@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 import mlflow
+import torch
 import yaml
 
 from rfdetr import RFDETRSeg2XLarge, RFDETRLarge, RFDETRSegPreview, RFDETRMedium,RFDETRSegXLarge,RFDETR2XLarge
@@ -85,6 +86,58 @@ def _resolve_path(path_value: Optional[str]) -> Optional[Path]:
     if not path.is_absolute():
         path = (BASE_DIR / path).resolve()
     return path
+
+
+def _prepare_compatible_resume(
+    resume_path: Optional[Path],
+    class_names: Any,
+    output_dir: Path,
+) -> Optional[Path]:
+    if resume_path is None or not resume_path.exists():
+        return resume_path
+    if not isinstance(class_names, list):
+        return resume_path
+
+    checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+    checkpoint_model = checkpoint.get("model")
+    if not isinstance(checkpoint_model, dict):
+        return resume_path
+
+    expected_num_classes = len(class_names) + 1
+    model.model.reinitialize_detection_head(expected_num_classes)
+    reference_state = model.model.model.state_dict()
+
+    has_shape_mismatch = any(
+        key in checkpoint_model and checkpoint_model[key].shape != ref_value.shape
+        for key, ref_value in reference_state.items()
+        if hasattr(ref_value, "shape")
+    )
+    if not has_shape_mismatch:
+        return resume_path
+
+    compatible_state = {}
+    replaced_keys = []
+    for key, ref_value in reference_state.items():
+        checkpoint_value = checkpoint_model.get(key)
+        if checkpoint_value is None or getattr(checkpoint_value, "shape", None) != ref_value.shape:
+            compatible_state[key] = ref_value.detach().clone()
+            replaced_keys.append(key)
+        else:
+            compatible_state[key] = checkpoint_value.detach().clone()
+
+    compatible_checkpoint = {
+        "model": compatible_state,
+        "args": checkpoint.get("args"),
+        "compat_resume_source": str(resume_path),
+        "compat_resume_replaced_keys": replaced_keys,
+    }
+    compatible_path = output_dir / f"{resume_path.stem}.compat{resume_path.suffix}"
+    torch.save(compatible_checkpoint, compatible_path)
+    print(
+        "Resume checkpoint has incompatible parameter shapes for the current RF-DETR head. "
+        f"Created compatible weights at {compatible_path} and reset optimizer resume state."
+    )
+    return compatible_path
 
 
 def _load_params_file(params_path: Path, parser: argparse.ArgumentParser) -> Dict[str, Any]:
@@ -202,6 +255,11 @@ output_root = _resolve_path(training_args["output_dir"]) or (BASE_DIR / "outputs
 run_name = training_args["run"]
 run_output_dir = output_root / run_name
 run_output_dir.mkdir(parents=True, exist_ok=True)
+resume_path = _prepare_compatible_resume(
+    resume_path,
+    training_args.get("class_names"),
+    run_output_dir,
+)
 training_args["output_dir"] = str(output_root)
 training_args["run_output_dir"] = str(run_output_dir)
 training_args["dataset_dir"] = str(dataset_dir_path)

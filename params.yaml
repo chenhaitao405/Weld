@@ -2,13 +2,14 @@ preprocess:
 #TODO: window的计算参数调整（向内缩进的范围）
   profile: pair_1120_1208
   seed: 42
-  output_base_dir: data/dvctest
+  output_base_dir: data/1120_dvctest
   steps: 123456
   dataset_pairs:
   - image_root: datasets/images/1120
     label_root: datasets/labels/1120
-  - image_root: datasets/images/1208
-    label_root: datasets/labels/1208
+  # - image_root: datasets/images/1208
+  #   label_root: datasets/labels/1208
+# 数据集需要按labelme保存
 #  - image_root: datasets/images/nocrack
 #    label_root: datasets/labels/nocrack
 #  - image_root: /datasets/PAR/Xray/opensource/SWRDdvcpipeline/images/swrd8bit_crop
@@ -16,7 +17,7 @@ preprocess:
   labelme2yolo:
     seg: true
     unify_to_crack: false
-#    val_manifest: datasets/labels/1120/val_manifest.json
+    val_manifest: datasets/labels/1120/val_manifest.json
   yolo_roi_extractor:
     model_path: ./model/weldROI4.pt
     roi_conf: 0.25
@@ -64,7 +65,7 @@ rfdetr:
   - 裂纹
   num_classes: 8
   epochs: 500
-  batch_size: 2
+  batch_size: 4
   grad_accum_steps: 8
   lr: 0.0001
   early_stopping: true
@@ -79,7 +80,7 @@ data:
 train:
   epochs: 200
   imgsz: 640
-  batch: 8
+  batch: 32
   lr: 0.001
   output_dir: outputs/welddetect
   run: crack_baseline
