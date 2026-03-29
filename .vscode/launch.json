@@ -38,7 +38,7 @@
         // "--convert-yolo-opts",
         // "--input_dir ${workspaceFolder}/data/1120_val/yolo_det --output_dir ${workspaceFolder}/data/1120_val/coco_from_yolo_det --task det --test_split_ratio 0",
         "--run-inference-opts",
-        "--image-dir ${workspaceFolder}/data/cor_valdata_1120 --mode det --wide-slice --roi-weights ${workspaceFolder}/model/weldROI4.pt --primary-conf 0.18 --primary-weights ${workspaceFolder}/model/0208primary.pth",
+        "--image-dir ${workspaceFolder}/data/cor_valdata_1120 --mode det --wide-slice --roi-weights ${workspaceFolder}/model/weldROI4.pt --primary-conf 0.15 --primary-weights ${workspaceFolder}/model/0208primary.pth",
         "--validate-opts",
         "--label-format coco --coco-json ${workspaceFolder}/data/cor_valdata_1120/_annotations.coco.json --copy-images --match-mode multi --iou-threshold 0.05",
         "--visualize-opts",

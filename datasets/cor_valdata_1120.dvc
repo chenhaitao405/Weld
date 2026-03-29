@@ -1,0 +1,6 @@
+outs:
+- md5: c84469a97f355716030aadc1c806cb26.dir
+  size: 529291520
+  nfiles: 169
+  hash: md5
+  path: cor_valdata_1120
