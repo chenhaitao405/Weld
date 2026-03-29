@@ -32,15 +32,15 @@
       "console": "integratedTerminal",
       "args": [
         "--base-path",
-        "${workspaceFolder}/outputs/1120_val/full_pipeline_det_wide_slice",
-        "--seg2det-opts",
-        "--input_dir ${workspaceFolder}/data/1120_val/yolo --output_dir ${workspaceFolder}/data/1120_val/yolo_det --mode det",
-        "--convert-yolo-opts",
-        "--input_dir ${workspaceFolder}/data/1120_val/yolo_det --output_dir ${workspaceFolder}/data/1120_val/coco_from_yolo_det --task det --test_split_ratio 0",
+        "${workspaceFolder}/outputs/1120_val/0208",
+        // "--seg2det-opts",
+        // "--input_dir ${workspaceFolder}/data/1120_val/yolo --output_dir ${workspaceFolder}/data/1120_val/yolo_det --mode det",
+        // "--convert-yolo-opts",
+        // "--input_dir ${workspaceFolder}/data/1120_val/yolo_det --output_dir ${workspaceFolder}/data/1120_val/coco_from_yolo_det --task det --test_split_ratio 0",
         "--run-inference-opts",
-        "--image-dir ${workspaceFolder}/data/1120_val/yolo/images/val --mode det --wide-slice --roi-weights ${workspaceFolder}/model/weldROI4.pt --primary-conf 0.25 --primary-weights ${workspaceFolder}/model/0208primary.pth",
+        "--image-dir ${workspaceFolder}/data/cor_valdata_1120 --mode det --wide-slice --roi-weights ${workspaceFolder}/model/weldROI4.pt --primary-conf 0.18 --primary-weights ${workspaceFolder}/model/0208primary.pth",
         "--validate-opts",
-        "--label-format coco --coco-json ${workspaceFolder}/data/1120_val/coco_from_yolo_det/valid/_annotations.coco.json --copy-images --match-mode multi --iou-threshold 0.3",
+        "--label-format coco --coco-json ${workspaceFolder}/data/cor_valdata_1120/_annotations.coco.json --copy-images --match-mode multi --iou-threshold 0.05",
         "--visualize-opts",
         "--title \"1120_val weld det wide-slice report\"",
         "--mlflow",
@@ -53,26 +53,5 @@
       ],
       "python": "/home/cht/miniconda3/envs/weld-gpu/bin/python"
     },
-    {
-      "name": "Weld Validate+Vis: 1120_val det wide-slice",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/run_full_pipeline.py",
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "args": [
-        "--steps",
-        "23",
-        "--base-path",
-        "${workspaceFolder}/outputs/1120_val/full_pipeline_det_wide_slice",
-        "--run-inference-opts",
-        "--image-dir ${workspaceFolder}/data/1120_val/yolo/images/val",
-        "--validate-opts",
-        "--inference-json ${workspaceFolder}/outputs/1120_val/full_pipeline_det_wide_slice/infer/inference_results.json --label-format coco --coco-json ${workspaceFolder}/data/1120_val/coco_from_yolo_det/valid/_annotations.coco.json --copy-images --match-mode multi --iou-threshold 0.3",
-        "--visualize-opts",
-        "--title \"1120_val weld det wide-slice report\""
-      ],
-      "python": "/home/cht/miniconda3/envs/weld-gpu/bin/python"
-    }
   ]
 }

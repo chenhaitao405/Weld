@@ -2,13 +2,13 @@ preprocess:
 #TODO: window的计算参数调整（向内缩进的范围）
   profile: pair_1120_1208
   seed: 42
-  output_base_dir: data/1120_dvctest
+  output_base_dir: data/1120_1208
   steps: 123456
   dataset_pairs:
   - image_root: datasets/images/1120
     label_root: datasets/labels/1120
-  # - image_root: datasets/images/1208
-  #   label_root: datasets/labels/1208
+  - image_root: datasets/images/1208
+    label_root: datasets/labels/1208
 # 数据集需要按labelme保存
 #  - image_root: datasets/images/nocrack
 #    label_root: datasets/labels/nocrack
@@ -51,9 +51,19 @@ preprocess:
 rfdetr:
   dataset_dir: "${preprocess.output_base_dir}/coco_from_patch"
   output_dir: outputs/rfdetr
-  run: 1120_SWRD_resumePatch
+  run: 1208_1120_resume_dataenhance
   resume: model/0208primary.pth
   resolution: 840
+  multi_scale: true
+  expanded_scales: true
+  aug_config:
+    HorizontalFlip:
+      p: 0.5
+    VerticalFlip:
+      p: 0.5
+    Rotate:
+      limit: 10
+      p: 0.3
   class_names:
   - 其他
   - 内凹
@@ -69,7 +79,7 @@ rfdetr:
   grad_accum_steps: 8
   lr: 0.0001
   early_stopping: true
-  metrics_path: metrics/rfdetr.json
+  metrics_path: metrics/rfdetr/${rfdetr.run}.json
   keep_best_only: true
 data:
   tag: crack_v1

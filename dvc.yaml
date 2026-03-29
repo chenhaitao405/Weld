@@ -30,7 +30,8 @@ stages:
       - rfdetr
       - preprocess.output_base_dir
     outs:
-      - ${rfdetr.output_dir}:
+      - ${rfdetr.output_dir}/${rfdetr.run}:
           cache: false
+          persist: true
     metrics:
       - ${rfdetr.metrics_path}

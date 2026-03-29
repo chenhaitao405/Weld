@@ -215,6 +215,10 @@ def _load_training_args() -> Dict[str, Any]:
         "num_classes": len(CLASS_NAMES),
         "metrics_path": DEFAULT_METRICS_PATH,
         "keep_best_only": DEFAULT_KEEP_BEST_ONLY,
+        "resolution": None,
+        "multi_scale": None,
+        "expanded_scales": None,
+        "aug_config": None,
     }
 
     if args.params_file:
@@ -426,22 +430,23 @@ model.callbacks["on_train_end"].append(train_end_callback)
 with _log_terminal_output(log_file_path):
     with mlflow.start_run(run_name=run_name):
         mlflow.log_params(_stringify_params(training_args))
-        model.train(
-            dataset_dir=training_args["dataset_dir"],
-            epochs=training_args["epochs"],
-            batch_size=training_args["batch_size"],
-            grad_accum_steps=training_args["grad_accum_steps"],
-            lr=training_args["lr"],
-            output_dir=str(run_output_dir),
-            early_stopping=training_args["early_stopping"],
-            early_stopping_patience=30,
-            run=training_args["run"],
-            # resolution= training_args["resolution"],
-            # positional_encoding_size= 1080//12,
-            class_names=training_args["class_names"],
-            num_classes=training_args["num_classes"],
-            resume=training_args["resume"],
-            # eval_max_dets=100,
-            run_test=False,
-
-        )
+        train_kwargs = {
+            "dataset_dir": training_args["dataset_dir"],
+            "epochs": training_args["epochs"],
+            "batch_size": training_args["batch_size"],
+            "grad_accum_steps": training_args["grad_accum_steps"],
+            "lr": training_args["lr"],
+            "output_dir": str(run_output_dir),
+            "early_stopping": training_args["early_stopping"],
+            "early_stopping_patience": 30,
+            "run": training_args["run"],
+            "class_names": training_args["class_names"],
+            "num_classes": training_args["num_classes"],
+            "resume": training_args["resume"],
+            "run_test": False,
+        }
+        for optional_key in ("resolution", "multi_scale", "expanded_scales", "aug_config"):
+            optional_value = training_args.get(optional_key)
+            if optional_value is not None:
+                train_kwargs[optional_key] = optional_value
+        model.train(**train_kwargs)
