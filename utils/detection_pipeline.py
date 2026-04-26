@@ -319,7 +319,7 @@ def process_roi_and_segmentation(
 
         merged_defects = mapped_primary + wide_slice_mapped
         if wide_slice_mapped:
-            merged_defects = _apply_classwise_nms(merged_defects, fusion_iou)
+            merged_defects = _merge_classwise_overlapping_boxes(merged_defects, fusion_iou)
         merged_defects = _suppress_contained_boxes(merged_defects)
 
         roi_payload: Dict[str, Any] = {
@@ -434,7 +434,7 @@ def _process_roi_and_detection(
 
         merged_detections = mapped_detections + wide_slice_mapped
         if wide_slice_mapped:
-            merged_detections = _apply_classwise_nms(merged_detections, fusion_iou)
+            merged_detections = _merge_classwise_overlapping_boxes(merged_detections, fusion_iou)
         merged_detections = _suppress_contained_boxes(merged_detections)
 
         roi_payload = {
@@ -1084,6 +1084,84 @@ def _apply_classwise_nms(detections: List[Dict[str, Any]], iou_threshold: float)
     return kept
 
 
+def _merge_classwise_overlapping_boxes(detections: List[Dict[str, Any]],
+                                       iou_threshold: float,
+                                       min_overlap_ratio: float = 0.1) -> List[Dict[str, Any]]:
+    """
+    Merge same-class detections that form an overlap-connected component.
+
+    Wide-slice inference can produce long duplicate boxes whose IoU is low even
+    when a large portion of the smaller box overlaps.  A connected component
+    merge prevents A-B-C chains from leaving C behind after B is suppressed.
+    """
+    if not detections:
+        return []
+
+    count = len(detections)
+    parents = list(range(count))
+
+    def find(idx: int) -> int:
+        while parents[idx] != idx:
+            parents[idx] = parents[parents[idx]]
+            idx = parents[idx]
+        return idx
+
+    def union(a_idx: int, b_idx: int) -> None:
+        root_a = find(a_idx)
+        root_b = find(b_idx)
+        if root_a != root_b:
+            parents[root_b] = root_a
+
+    for i in range(count):
+        for j in range(i + 1, count):
+            det_a = detections[i]
+            det_b = detections[j]
+            if det_a.get("class_id") != det_b.get("class_id"):
+                continue
+            bbox_a = det_a.get("bbox")
+            bbox_b = det_b.get("bbox")
+            if not bbox_a or not bbox_b:
+                continue
+            area_a = _bbox_area(bbox_a)
+            area_b = _bbox_area(bbox_b)
+            if area_a <= 0 or area_b <= 0:
+                continue
+            inter = _bbox_intersection_area(bbox_a, bbox_b)
+            if inter <= 0:
+                continue
+            overlap_ratio = inter / min(area_a, area_b)
+            if _bbox_iou(bbox_a, bbox_b) >= iou_threshold or overlap_ratio >= min_overlap_ratio:
+                union(i, j)
+
+    groups: Dict[int, List[int]] = {}
+    for idx in range(count):
+        groups.setdefault(find(idx), []).append(idx)
+
+    merged: List[Dict[str, Any]] = []
+    for indices in groups.values():
+        best_idx = max(indices, key=lambda i: float(detections[i].get("confidence", 0.0)))
+        best = detections[best_idx]
+        if len(indices) == 1:
+            merged.append(best.copy())
+            continue
+
+        boxes = [detections[i]["bbox"] for i in indices]
+        fused = best.copy()
+        fused["bbox"] = [
+            float(min(box[0] for box in boxes)),
+            float(min(box[1] for box in boxes)),
+            float(max(box[2] for box in boxes)),
+            float(max(box[3] for box in boxes))
+        ]
+        sources = {detections[i].get("source") for i in indices}
+        if len(sources) > 1:
+            fused["source"] = "fused"
+        fused.pop("polygon", None)
+        merged.append(fused)
+
+    return sorted(merged, key=lambda d: float(d.get("confidence", 0.0)), reverse=True)
+
+
 def _suppress_contained_boxes(detections: List[Dict[str, Any]],
                               containment_thresh: float = 0.9) -> List[Dict[str, Any]]:
     """
@@ -1140,7 +1218,11 @@ def _suppress_contained_boxes(detections: List[Dict[str, Any]],
     return [det for det, flag in zip(detections, keep) if flag]
 
 
-def _bbox_iou(box_a: Sequence[float], box_b: Sequence[float]) -> float:
+def _bbox_area(box: Sequence[float]) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def _bbox_intersection_area(box_a: Sequence[float], box_b: Sequence[float]) -> float:
     ax1, ay1, ax2, ay2 = box_a
     bx1, by1, bx2, by2 = box_b
     inter_x1 = max(ax1, bx1)
@@ -1149,11 +1231,15 @@ def _bbox_iou(box_a: Sequence[float], box_b: Sequence[float]) -> float:
     inter_y2 = min(ay2, by2)
     inter_w = max(0.0, inter_x2 - inter_x1)
     inter_h = max(0.0, inter_y2 - inter_y1)
-    inter_area = inter_w * inter_h
+    return inter_w * inter_h
+
+
+def _bbox_iou(box_a: Sequence[float], box_b: Sequence[float]) -> float:
+    inter_area = _bbox_intersection_area(box_a, box_b)
     if inter_area <= 0:
         return 0.0
-    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    area_a = _bbox_area(box_a)
+    area_b = _bbox_area(box_b)
     union = area_a + area_b - inter_area
     if union <= 0:
         return 0.0

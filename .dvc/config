@@ -2,3 +2,6 @@
     remote = local
 ['remote "local"']
     url = /home/cht/datasets/dvctemp
+['remote "aliyun"']
+    url = oss://aivisionimages/weld-dvc
+    oss_endpoint = oss-cn-hangzhou.aliyuncs.com

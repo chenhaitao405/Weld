@@ -10,16 +10,18 @@
       "console": "integratedTerminal",
       "args": [
         "--image-dir",
-        "/home/cht/datasets/weld_temp",
+        "/home/cht/datasets/iqiTEST",
         "--mode",
         "det",
         "--wide-slice",
         "--roi-weights",
         "${workspaceFolder}/model/weldROI4.pt",
         "--primary-conf",
-        "0.25",
+        "0.15",
         "--primary-weights",
-        "${workspaceFolder}/model/0208primary.pth"
+        "${workspaceFolder}/model/0208primary.pth",
+        "--output-dir",
+        "inference_outputs/th15_fusion"
       ],
       "python": "/home/cht/miniconda3/envs/weld-gpu/bin/python"
     },
